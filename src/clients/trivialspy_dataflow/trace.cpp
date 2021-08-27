@@ -1,0 +1,739 @@
+/* Buffered Tracing Implementation */
+#include "dr_api.h"
+#include "trace.h"
+#include "drmgr.h"
+#include "drvector.h"
+#include <stdint.h>
+#include <stddef.h> /* for offsetof */
+#include <string.h> /* for memcpy */
+
+#define ALIGNED(x, alignment) ((((ptr_uint_t)x) & ((alignment)-1)) == 0)
+#define ALIGN_FORWARD(x, alignment) \
+    ((((ptr_uint_t)x) + ((alignment)-1)) & (~((alignment)-1)))
+#define ALIGN_BACKWARD(x, alignment) (((ptr_uint_t)x) & (~((ptr_uint_t)(alignment)-1)))
+
+#include "trivial_define.h"
+
+enum {
+    TRACE_BUF_TLS_OFFS_BUF_PTR,
+    TRACE_BUF_TLS_OFFS_BUF_END,
+    TRACE_BUF_TLS_OFFS_BUF_BASE,
+    TRACE_BUF_TLS_COUNT
+};
+
+typedef struct {
+    byte *seg_base;
+    byte *cli_base;    /* the base of the buffer from the client's perspective */
+    byte *buf_base;    /* the actual base of the buffer */
+    size_t total_size; /* the actual size of the buffer */
+} per_thread_t;
+
+struct _trace_buf_t {
+    size_t buf_size;
+    uint vec_idx; /* index into the clients vector */
+    /* callbacks for buffer checking and updating */
+    trace_buf_full_cb_t full_cb;
+    trace_buf_fill_num_cb_t fill_num_cb;
+    /* tls implementation */
+    int tls_idx;
+    uint tls_offs;
+    reg_id_t tls_seg;
+};
+
+/* global TLS implementation */
+enum {
+    INSTRACE_TLS_OFFS_BUF_PTR,
+    INSTRACE_TLS_COUNT, /* total number of TLS slots allocated */
+};
+
+static int tls_idx;
+static uint tls_offs;
+static reg_id_t tls_seg;
+
+typedef struct {
+    byte *numInsBuff;
+} ins_per_thread_t;
+
+/* sampling variables */
+static bool enable_sampling = false;
+static int window_enable = 0;
+static int window_disable = 0;
+
+/* holds per-client (also per-buf) information */
+static drvector_t clients;
+/* A flag to avoid work when no buffers were ever created. */
+static bool any_bufs_created;
+
+static per_thread_t *
+per_thread_init(void *drcontext, trace_buf_t *buf);
+
+static void
+event_thread_init(void *drcontext);
+static void
+event_thread_exit(void *drcontext);
+
+void
+trace_buf_enable_sampling(int win_enable, int win_disable)
+{
+    enable_sampling = true;
+    window_enable = win_enable;
+    window_disable = win_disable;
+}
+
+void
+trace_buf_disable_sampling()
+{
+    enable_sampling = false;
+}
+
+bool
+trace_buf_get_current_sampling_state(void* drcontext)
+{
+    ins_per_thread_t *pt = (ins_per_thread_t*)drmgr_get_tls_field(drcontext, tls_idx);
+    return (size_t)BUF_PTR(pt->numInsBuff, tls_offs) < (size_t)window_enable;
+}
+
+trace_buf_t *
+trace_buf_create_trace_buffer(size_t buf_size)
+{
+    return trace_buf_create_trace_buffer_ex(buf_size, NULL, NULL);
+}
+
+trace_buf_t *
+trace_buf_create_trace_buffer_ex(size_t buf_size, trace_buf_full_cb_t full_cb, trace_buf_fill_num_cb_t fill_num_cb)
+{
+    trace_buf_t *new_client;
+    int tls_idx;
+    uint tls_offs;
+    reg_id_t tls_seg;
+
+    /* allocate raw TLS so we can access it from the code cache */
+    if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, TRACE_BUF_TLS_COUNT, 0))
+        return NULL;
+
+    tls_idx = drmgr_register_tls_field();
+    if (tls_idx == -1)
+        return NULL;
+
+    /* init the client struct */
+    new_client = (trace_buf_t*)dr_global_alloc(sizeof(*new_client));
+    new_client->buf_size = buf_size;
+    new_client->full_cb  = full_cb;
+    new_client->fill_num_cb = fill_num_cb;
+    new_client->tls_offs = tls_offs;
+    new_client->tls_seg = tls_seg;
+    new_client->tls_idx = tls_idx;
+    /* We don't attempt to re-use NULL entries (presumably which
+     * have already been freed), for simplicity.
+     */
+    new_client->vec_idx = clients.entries;
+    drvector_append(&clients, new_client);
+
+    if (!any_bufs_created)
+        any_bufs_created = true;
+
+    return new_client;
+}
+
+bool
+trace_buf_free(trace_buf_t *buf)
+{
+    if (!(buf != NULL && (trace_buf_t*)drvector_get_entry(&clients, buf->vec_idx) == buf)) {
+        return false;
+    }
+    /* NULL out the entry in the vector */
+    ((trace_buf_t **)clients.array)[buf->vec_idx] = NULL;
+
+    if (!drmgr_unregister_tls_field(buf->tls_idx) || !dr_raw_tls_cfree(buf->tls_offs, TRACE_BUF_TLS_COUNT))
+        return false;
+    dr_global_free(buf, sizeof(*buf));
+
+    return true;
+}
+
+void *
+trace_buf_get_buffer_ptr(void *drcontext, trace_buf_t *buf)
+{
+    per_thread_t *data = (per_thread_t*)drmgr_get_tls_field(drcontext, buf->tls_idx);
+    return BUF_PTR(data->seg_base, buf->tls_offs);
+}
+
+void *
+trace_buf_get_buffer_end(void *drcontext, trace_buf_t *buf)
+{
+    per_thread_t *data = (per_thread_t*)drmgr_get_tls_field(drcontext, buf->tls_idx);
+    return data->cli_base + buf->buf_size;
+}
+
+void
+trace_buf_set_buffer_ptr(void *drcontext, trace_buf_t *buf, void *new_ptr)
+{
+    per_thread_t *data = (per_thread_t*)drmgr_get_tls_field(drcontext, buf->tls_idx);
+    BUF_PTR(data->seg_base, buf->tls_offs) = (byte*)new_ptr;
+}
+
+void *
+trace_buf_get_buffer_base(void *drcontext, trace_buf_t *buf)
+{
+    per_thread_t *data = (per_thread_t*)drmgr_get_tls_field(drcontext, buf->tls_idx);
+    return data->cli_base;
+}
+
+size_t
+trace_buf_get_buffer_size(void *drcontext, trace_buf_t *buf)
+{
+    return buf->buf_size;
+}
+
+static void bb_update(int insCnt) {
+        void *drcontext = dr_get_current_drcontext();
+        ins_per_thread_t *pt = (ins_per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+        uint64_t val = reinterpret_cast<uint64_t>(BUF_PTR(pt->numInsBuff, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR));
+        val += insCnt;
+        BUF_PTR(pt->numInsBuff, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR) = reinterpret_cast<byte*>(val);
+    }
+
+static void bb_update_and_check(int insCnt) {
+    void *drcontext = dr_get_current_drcontext();
+    ins_per_thread_t *pt = (ins_per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    uint64_t val = reinterpret_cast<uint64_t>(BUF_PTR(pt->numInsBuff, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR));
+    val += insCnt;
+    if(val>=(uint64_t)window_disable) { val=val-(uint64_t)window_disable; }
+    BUF_PTR(pt->numInsBuff, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR) = reinterpret_cast<byte*>(val);
+}
+
+#if defined(ARM) || defined(AARCH64)
+#        define TRACE_LOAD_IMM32_0(dc, Rt, imm) \
+            INSTR_CREATE_movz((dc), (Rt), (imm), OPND_CREATE_INT(0))
+#        define TRACE_LOAD_IMM32_16(dc, Rt, imm) \
+            INSTR_CREATE_movk((dc), (Rt), (imm), OPND_CREATE_INT(16))
+#        define TRACE_LOAD_IMM32_32(dc, Rt, imm) \
+            INSTR_CREATE_movk((dc), (Rt), (imm), OPND_CREATE_INT(32))
+#        define TRACE_LOAD_IMM32_48(dc, Rt, imm) \
+            INSTR_CREATE_movk((dc), (Rt), (imm), OPND_CREATE_INT(48))
+static inline void
+minstr_load_wint_to_reg(void *drcontext, instrlist_t *ilist, instr_t *where, reg_id_t reg,
+                        int32_t wint_num)
+{
+    MINSERT(ilist, where,
+            TRACE_LOAD_IMM32_0(drcontext, opnd_create_reg(reg),
+                                  OPND_CREATE_IMMEDIATE_INT(wint_num & 0xffff)));
+    wint_num = (wint_num >> 16) & 0xffff;
+    if(wint_num) {
+        MINSERT(ilist, where,
+                TRACE_LOAD_IMM32_16(drcontext, opnd_create_reg(reg),
+                                    OPND_CREATE_IMMEDIATE_INT(wint_num)));
+    }
+}
+
+#ifdef AARCH64
+static inline void
+minstr_load_wwint_to_reg(void *drcontext, instrlist_t *ilist, instr_t *where,
+                         reg_id_t reg, uint64_t wwint_num)
+{
+    MINSERT(ilist, where,
+            TRACE_LOAD_IMM32_0(drcontext, opnd_create_reg(reg),
+                                  OPND_CREATE_IMMEDIATE_INT(wwint_num & 0xffff)));
+    uint64_t tmp = (wwint_num >> 16) & 0xffff;
+    if(tmp) {
+        MINSERT(ilist, where,
+            TRACE_LOAD_IMM32_16(drcontext, opnd_create_reg(reg),
+                                OPND_CREATE_IMMEDIATE_INT(tmp)));
+    }
+    tmp = (wwint_num >> 32) & 0xffff;
+    if(tmp) {
+        MINSERT(ilist, where,
+            TRACE_LOAD_IMM32_32(drcontext, opnd_create_reg(reg),
+                                OPND_CREATE_IMMEDIATE_INT(tmp)));
+    }
+    tmp = (wwint_num >> 48) & 0xffff;
+    if(tmp) {
+        MINSERT(ilist, where,
+            TRACE_LOAD_IMM32_48(drcontext, opnd_create_reg(reg),
+                                OPND_CREATE_IMMEDIATE_INT(tmp)));
+    }
+}
+#endif
+#    endif
+
+static void insert_buf_check(void *drcontext, instrlist_t *bb, instr_t *ins, ushort *scratch) {
+    unsigned int i;
+    // buffered checking
+    reg_id_t reg_ptr, reg_end;
+    // reserve registers if not dead
+    RESERVE_AFLAGS(drcontext, bb, ins);
+    RESERVE_REG(drcontext, bb, ins, NULL, reg_ptr);
+#if defined(ARM) || defined(AARCH64)
+    // for ARM, we always need two register for the check of bursty sampling.
+    RESERVE_REG(drcontext, bb, ins, NULL, reg_end);
+#endif
+    instr_t* skip_to_end = INSTR_CREATE_label(drcontext);
+    if (enable_sampling) {
+        instr_t* skip_to_update = INSTR_CREATE_label(drcontext);
+        dr_insert_read_raw_tls(drcontext, bb, ins, tls_seg, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR, reg_ptr);
+        // Clear insCnt when insCnt > WINDOW_DISABLE
+#if defined(ARM) || defined(AARCH64)
+    #ifdef AARCH64
+        minstr_load_wwint_to_reg(drcontext, bb, ins, reg_end, window_enable);
+    #else
+        minstr_load_wint_to_reg(drcontext, bb, ins, reg_end, window_enable);
+    #endif
+        MINSERT(bb, ins, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
+#else
+        MINSERT(bb, ins, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(window_enable)));
+#endif
+        MINSERT(bb, ins, XINST_CREATE_jump_cond(drcontext, DR_PRED_LE, opnd_create_instr(skip_to_update)));
+        // clear the buffer when not sampled
+        for (i = 0; i < clients.entries; ++i) {
+            trace_buf_t *buf = (trace_buf_t*)drvector_get_entry(&clients, i);
+            if (buf != NULL && buf->full_cb!=NULL && scratch[i]>0) {
+                trace_buf_insert_clear_buf(drcontext, buf, bb, ins, reg_ptr/*scratch*/);
+            }
+        }
+        MINSERT(bb, ins, XINST_CREATE_jump(drcontext, opnd_create_instr(skip_to_end)));
+        MINSERT(bb, ins, skip_to_update);
+    }
+#if !defined(ARM) && !defined(AARCH64)
+    // for X86/64, we can lazily reserve the register to avoid unnecessary spilling.
+    RESERVE_REG(drcontext, bb, ins, NULL, reg_end);
+#endif
+    // now check if any buffers are full and update if necessary
+    for (i = 0; i < clients.entries; ++i) {
+        trace_buf_t *buf = (trace_buf_t*)drvector_get_entry(&clients, i);
+        if (buf != NULL && buf->full_cb!=NULL && scratch[i]>0) {
+            per_thread_t *data = (per_thread_t*)drmgr_get_tls_field(drcontext, buf->tls_idx);
+            DR_ASSERT(scratch[i] <= buf->buf_size);
+            instr_t* skip_update = INSTR_CREATE_label(drcontext);
+            // when there may be overflow, we check and update the trace buffer if possible
+            // the end buffer pointer
+            trace_buf_insert_load_buf_end(drcontext, buf, bb, ins, reg_end);
+            // current buffer pointer
+            trace_buf_insert_load_buf_ptr(drcontext, buf, bb, ins, reg_ptr);
+            // increament the buffer pointer with memRefCnt
+            MINSERT(bb, ins,
+                    XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr),
+                                     OPND_CREATE_INT16(scratch[i])));
+            // if buffer will not be full, we will skip the heavy update
+            MINSERT(bb, ins, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
+            MINSERT(bb, ins, XINST_CREATE_jump_cond(drcontext, DR_PRED_LT, opnd_create_instr(skip_update)));
+            // get current buffer base
+            dr_insert_read_raw_tls(drcontext, bb, ins, buf->tls_seg,
+                           buf->tls_offs + sizeof(void *) * TRACE_BUF_TLS_OFFS_BUF_BASE,
+                           reg_ptr);
+            // get current buffer end
+            trace_buf_insert_load_buf_ptr(drcontext, buf, bb, ins, reg_end);
+            // insert cleancall for updating the buffered trace
+            dr_insert_clean_call(drcontext, bb, ins, (void*)buf->full_cb, false, 2, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end));
+            // clear the buffer
+            trace_buf_insert_clear_buf(drcontext, buf, bb, ins, reg_ptr/*scratch*/);
+            // skip to here
+            MINSERT(bb, ins, skip_update);
+        }
+    }
+    // restore registers if reserved
+#if defined(ARM) || defined(AARCH64)
+    MINSERT(bb, ins, skip_to_end);
+    UNRESERVE_REG(drcontext, bb, ins, reg_end);
+#else
+    UNRESERVE_REG(drcontext, bb, ins, reg_end);
+    MINSERT(bb, ins, skip_to_end);
+#endif
+    UNRESERVE_REG(drcontext, bb, ins, reg_ptr);
+    UNRESERVE_AFLAGS(drcontext, bb, ins);
+}
+
+static dr_emit_flags_t
+event_basic_block(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, bool translating, OUT void **user_data)
+{
+    // quick return when there are no entries exist
+    if(!any_bufs_created) {
+        return DR_EMIT_DEFAULT;
+    }
+    unsigned int i;
+    instr_t *instr;
+    int num_instructions = 0;
+    ushort* scratch = (ushort*)dr_thread_alloc(drcontext, sizeof(ushort)*clients.entries);
+    // clear the scratch for accumulation
+    for (i = 0; i < clients.entries; ++i) {
+        trace_buf_t *buf = (trace_buf_t*)drvector_get_entry(&clients, i);
+        if (buf != NULL && buf->full_cb!=NULL) {
+            DR_ASSERT(buf->fill_num_cb!=NULL);
+            scratch[i] = 0;
+        }
+    }
+    // estimate the future fill in slot numbers of each buffer
+    for (instr = instrlist_first(bb); instr != NULL; instr = instr_get_next(instr)) {
+        if(!instr_is_app(instr)) continue;
+        num_instructions++;
+        for (i = 0; i < clients.entries; ++i) {
+            trace_buf_t *buf = (trace_buf_t*)drvector_get_entry(&clients, i);
+            if (buf != NULL && buf->full_cb!=NULL) {
+                scratch[i] += buf->fill_num_cb(drcontext, instr);
+            }
+        }
+    }
+    // quick return if it doesn't have any application instructions
+    if(num_instructions==0) {
+        dr_thread_free(drcontext, scratch, sizeof(ushort)*clients.entries);
+        return DR_EMIT_DEFAULT;
+    }
+    // all instrumentation is insert into the beginning of the basic block
+    instr_t* insert_pt = instrlist_first(bb);
+    bool enable_check = false;
+    for (i = 0; i < clients.entries; ++i) {
+        trace_buf_t *buf = (trace_buf_t*)drvector_get_entry(&clients, i);
+        if (buf != NULL && buf->full_cb!=NULL && scratch[i]>0) {
+            enable_check = true;
+        }
+    }
+    // if sampling enabled, we need to insert instruction counts
+    if (enable_sampling) {
+        if(enable_check) {
+            dr_insert_clean_call(drcontext, bb, insert_pt, (void *)bb_update_and_check, false, 1, OPND_CREATE_INT32(num_instructions));
+        } else {
+            dr_insert_clean_call(drcontext, bb, insert_pt, (void *)bb_update, false, 1, OPND_CREATE_INT32(num_instructions));
+        }
+    }
+    if (enable_check) {
+        insert_buf_check(drcontext, bb, insert_pt, scratch);
+    }
+    dr_thread_free(drcontext, scratch, sizeof(ushort)*clients.entries);
+    return DR_EMIT_DEFAULT;
+}
+
+void
+event_thread_init(void *drcontext)
+{
+    // allocate raw tls field for fast update for sampling
+    ins_per_thread_t *pt = (ins_per_thread_t *)dr_thread_alloc(drcontext, sizeof(ins_per_thread_t));
+    pt->numInsBuff = (byte*)dr_get_dr_segment_base(tls_seg);
+    BUF_PTR(pt->numInsBuff, tls_offs) = 0;
+    drmgr_set_tls_field(drcontext, tls_idx, (void *)pt);
+    // allcoate tls field for each buffer
+    unsigned int i;
+    for (i = 0; i < clients.entries; ++i) {
+        per_thread_t *data;
+        trace_buf_t *buf = (trace_buf_t*)drvector_get_entry(&clients, i);
+        if (buf != NULL) {
+            data = per_thread_init(drcontext, buf);
+            drmgr_set_tls_field(drcontext, buf->tls_idx, data);
+            BUF_PTR(data->seg_base, buf->tls_offs) = data->cli_base;
+            BUF_PTR(data->seg_base,
+                    buf->tls_offs + sizeof(void *) * TRACE_BUF_TLS_OFFS_BUF_END) =
+                data->cli_base + buf->buf_size;
+            BUF_PTR(data->seg_base,
+                    buf->tls_offs + sizeof(void *) * TRACE_BUF_TLS_OFFS_BUF_BASE) =
+                data->cli_base;
+        }
+    }
+}
+
+void
+event_thread_exit(void *drcontext)
+{
+    // free raw tls field for fast update for sampling
+    ins_per_thread_t *pt = (ins_per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    dr_thread_free(drcontext, pt, sizeof(ins_per_thread_t));
+    // free tls field of each buffer
+    unsigned int i;
+    for (i = 0; i < clients.entries; ++i) {
+        trace_buf_t *buf = (trace_buf_t*)drvector_get_entry(&clients, i);
+        if (buf != NULL) {
+            per_thread_t *data = (per_thread_t*)drmgr_get_tls_field(drcontext, buf->tls_idx);
+            if (buf->full_cb!=NULL) {
+                byte *cli_ptr = BUF_PTR(data->seg_base, buf->tls_offs);
+                buf->full_cb(data->cli_base, cli_ptr);
+            }
+            dr_raw_mem_free(data->buf_base, data->total_size);
+            dr_thread_free(drcontext, data, sizeof(per_thread_t));
+        }
+    }
+}
+
+static per_thread_t *
+per_thread_init(void *drcontext, trace_buf_t *buf)
+{
+    size_t page_size = dr_page_size();
+    per_thread_t *per_thread = (per_thread_t*)dr_thread_alloc(drcontext, sizeof(per_thread_t));
+    byte *ret;
+    /* Keep seg_base in a per-thread data structure so we can get the TLS
+     * slot and find where the pointer points to in the buffer.
+     */
+    per_thread->seg_base = (byte*)dr_get_dr_segment_base(buf->tls_seg);
+    /* We construct a buffer right before a fault by allocating as
+     * many pages as needed to fit the buffer, plus another read-only
+     * page. Then, we return an address such that we have exactly
+     * buf_size bytes usable before we hit the ro page.
+     */
+    /* We no longer use the fault for updating the buffer, 
+     * so the extra page will not be allocated and protected.
+     */
+    per_thread->total_size = ALIGN_FORWARD(buf->buf_size, page_size);
+    ret = (byte*)dr_raw_mem_alloc(per_thread->total_size, DR_MEMPROT_READ | DR_MEMPROT_WRITE,
+                           NULL);
+    per_thread->buf_base = ret;
+    per_thread->cli_base = ret + ALIGN_FORWARD(buf->buf_size, page_size) - buf->buf_size;
+    return per_thread;
+}
+
+bool
+trace_init(void)
+{
+    drmgr_priority_t exit_priority = { sizeof(exit_priority),
+                                       DRMGR_PRIORITY_NAME_TRACE_BUF_EXIT, NULL, NULL,
+                                       DRMGR_PRIORITY_THREAD_EXIT_TRACE_BUF };
+    drmgr_priority_t init_priority = { sizeof(init_priority),
+                                       DRMGR_PRIORITY_NAME_TRACE_BUF_INIT, NULL, NULL,
+                                       DRMGR_PRIORITY_THREAD_INIT_TRACE_BUF };
+
+    if (!drvector_init(&clients, 1, false /*!synch*/, NULL) ||
+        !drmgr_register_thread_init_event_ex(event_thread_init, &init_priority) ||
+        !drmgr_register_thread_exit_event_ex(event_thread_exit, &exit_priority) ||
+        !drmgr_register_bb_instrumentation_event(event_basic_block, NULL, NULL)
+        )
+        return false;
+    tls_idx = drmgr_register_tls_field();
+    if (tls_idx == -1)
+        return false;
+    if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, INSTRACE_TLS_COUNT, 0))
+        return false;
+    return true;
+}
+
+void
+trace_exit(void)
+{
+    drmgr_unregister_thread_init_event(event_thread_init);
+    drmgr_unregister_thread_exit_event(event_thread_exit);
+    drmgr_unregister_bb_instrumentation_event(event_basic_block);
+    drmgr_unregister_tls_field(tls_idx);
+    dr_raw_tls_cfree(tls_offs, INSTRACE_TLS_COUNT);
+    drvector_delete(&clients);
+}
+
+void
+trace_buf_insert_load_buf_ptr(void *drcontext, trace_buf_t *buf, instrlist_t *ilist,
+                            instr_t *where, reg_id_t buf_ptr)
+{
+    dr_insert_read_raw_tls(drcontext, ilist, where, buf->tls_seg, buf->tls_offs, buf_ptr);
+}
+
+
+void
+trace_buf_insert_load_buf_end(void *drcontext, trace_buf_t *buf, instrlist_t *ilist,
+                            instr_t *where, reg_id_t buf_ptr)
+{
+    dr_insert_read_raw_tls(drcontext, ilist, where, buf->tls_seg,
+                           buf->tls_offs + sizeof(void *) * TRACE_BUF_TLS_OFFS_BUF_END,
+                           buf_ptr);
+}
+
+
+void
+trace_buf_insert_clear_buf(void *drcontext, trace_buf_t *buf, instrlist_t *ilist,
+                            instr_t *where, reg_id_t scratch)
+{
+    dr_insert_read_raw_tls(drcontext, ilist, where, buf->tls_seg,
+                           buf->tls_offs + sizeof(void *) * TRACE_BUF_TLS_OFFS_BUF_BASE,
+                           scratch);
+    dr_insert_write_raw_tls(drcontext, ilist, where, buf->tls_seg, buf->tls_offs,
+                            scratch);
+}
+
+
+void
+trace_buf_insert_update_buf_ptr(void *drcontext, trace_buf_t *buf, instrlist_t *ilist,
+                              instr_t *where, reg_id_t buf_ptr, reg_id_t scratch,
+                              ushort stride)
+{
+    /* straightforward, just increment buf_ptr */
+    MINSERT(
+        ilist, where,
+        XINST_CREATE_add(drcontext, opnd_create_reg(buf_ptr), OPND_CREATE_INT16(stride)));
+    dr_insert_write_raw_tls(drcontext, ilist, where, buf->tls_seg, buf->tls_offs,
+                            buf_ptr);
+}
+
+static bool
+trace_buf_insert_buf_store_1byte(void *drcontext, trace_buf_t *buf, instrlist_t *ilist,
+                               instr_t *where, reg_id_t buf_ptr, reg_id_t scratch,
+                               opnd_t opnd, short offset)
+{
+    instr_t *instr;
+    if (!opnd_is_reg(opnd) && !opnd_is_immed(opnd))
+        return false;
+    if (opnd_is_immed(opnd)) {
+#ifdef X86
+        instr =
+            XINST_CREATE_store_1byte(drcontext, OPND_CREATE_MEM8(buf_ptr, offset), opnd);
+#elif defined(AARCHXX)
+        /* this will certainly not fault, so don't set a translation */
+        MINSERT(ilist, where,
+                XINST_CREATE_load_int(drcontext, opnd_create_reg(scratch), opnd));
+        instr = XINST_CREATE_store_1byte(drcontext, OPND_CREATE_MEM8(buf_ptr, offset),
+                                         opnd_create_reg(scratch));
+#else
+#    error NYI
+#endif
+    } else {
+        instr =
+            XINST_CREATE_store_1byte(drcontext, OPND_CREATE_MEM8(buf_ptr, offset), opnd);
+    }
+    INSTR_XL8(instr, instr_get_app_pc(where));
+    MINSERT(ilist, where, instr);
+    return true;
+}
+
+static bool
+trace_buf_insert_buf_store_2bytes(void *drcontext, trace_buf_t *buf, instrlist_t *ilist,
+                                instr_t *where, reg_id_t buf_ptr, reg_id_t scratch,
+                                opnd_t opnd, short offset)
+{
+    instr_t *instr;
+    if (!opnd_is_reg(opnd) && !opnd_is_immed(opnd))
+        return false;
+    if (opnd_is_immed(opnd)) {
+#ifdef X86
+        instr = XINST_CREATE_store_2bytes(drcontext, OPND_CREATE_MEM16(buf_ptr, offset),
+                                          opnd);
+#elif defined(AARCHXX)
+        /* this will certainly not fault, so don't set a translation */
+        MINSERT(ilist, where,
+                XINST_CREATE_load_int(drcontext, opnd_create_reg(scratch), opnd));
+        instr = XINST_CREATE_store_2bytes(drcontext, OPND_CREATE_MEM16(buf_ptr, offset),
+                                          opnd_create_reg(scratch));
+#else
+#    error NYI
+#endif
+    } else {
+        instr = XINST_CREATE_store_2bytes(drcontext, OPND_CREATE_MEM16(buf_ptr, offset),
+                                          opnd);
+    }
+    INSTR_XL8(instr, instr_get_app_pc(where));
+    MINSERT(ilist, where, instr);
+    return true;
+}
+
+#if defined(X86_64) || defined(AARCH64)
+/* only valid on platforms where OPSZ_PTR != OPSZ_4 */
+static bool
+trace_buf_insert_buf_store_4bytes(void *drcontext, trace_buf_t *buf, instrlist_t *ilist,
+                                instr_t *where, reg_id_t buf_ptr, reg_id_t scratch,
+                                opnd_t opnd, short offset)
+{
+    instr_t *instr;
+    if (!opnd_is_reg(opnd) && !opnd_is_immed(opnd))
+        return false;
+    if (opnd_is_immed(opnd)) {
+#    ifdef X86_64
+        instr = XINST_CREATE_store(drcontext, OPND_CREATE_MEM32(buf_ptr, offset), opnd);
+#    elif defined(AARCH64)
+        /* this will certainly not fault, so don't set a translation */
+        instrlist_insert_mov_immed_ptrsz(drcontext, opnd_get_immed_int(opnd),
+                                         opnd_create_reg(scratch), ilist, where, NULL,
+                                         NULL);
+        instr = XINST_CREATE_store(drcontext, OPND_CREATE_MEM32(buf_ptr, offset),
+                                   opnd_create_reg(scratch));
+#    endif
+    } else {
+        //dr_fprintf(STDOUT, "opnd reg=%s\n", get_register_name(opnd_get_reg(opnd)));
+        instr = XINST_CREATE_store(drcontext, OPND_CREATE_MEM32(buf_ptr, offset), opnd);
+    }
+    INSTR_XL8(instr, instr_get_app_pc(where));
+    MINSERT(ilist, where, instr);
+    return true;
+}
+#endif
+
+static bool
+trace_buf_insert_buf_store_ptrsz(void *drcontext, trace_buf_t *buf, instrlist_t *ilist,
+                               instr_t *where, reg_id_t buf_ptr, reg_id_t scratch,
+                               opnd_t opnd, short offset)
+{
+    if (!opnd_is_reg(opnd) && !opnd_is_immed(opnd))
+        return false;
+    if (opnd_is_immed(opnd)) {
+        instr_t *first, *last;
+        ptr_int_t immed = opnd_get_immed_int(opnd);
+#ifdef X86
+        instrlist_insert_mov_immed_ptrsz(drcontext, immed,
+                                         OPND_CREATE_MEMPTR(buf_ptr, offset), ilist,
+                                         where, &first, &last);
+        for (;; first = instr_get_next(first)) {
+            INSTR_XL8(first, instr_get_app_pc(where));
+            if (last == NULL || first == last)
+                break;
+        }
+#elif defined(AARCHXX)
+        instr_t *instr;
+        instrlist_insert_mov_immed_ptrsz(drcontext, immed, opnd_create_reg(scratch),
+                                         ilist, where, &first, &last);
+        instr = XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(buf_ptr, offset),
+                                   opnd_create_reg(scratch));
+        INSTR_XL8(instr, instr_get_app_pc(where));
+        MINSERT(ilist, where, instr);
+#else
+#    error NYI
+#endif
+    } else {
+        instr_t *instr =
+            XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(buf_ptr, offset), opnd);
+        INSTR_XL8(instr, instr_get_app_pc(where));
+        MINSERT(ilist, where, instr);
+    }
+    return true;
+}
+
+
+bool
+trace_buf_insert_buf_store(void *drcontext, trace_buf_t *buf, instrlist_t *ilist,
+                         instr_t *where, reg_id_t buf_ptr, reg_id_t scratch, opnd_t opnd,
+                         opnd_size_t opsz, short offset)
+{
+    switch (opsz) {
+    case OPSZ_1:
+        return trace_buf_insert_buf_store_1byte(drcontext, buf, ilist, where, buf_ptr,
+                                              scratch, opnd, offset);
+    case OPSZ_2:
+        return trace_buf_insert_buf_store_2bytes(drcontext, buf, ilist, where, buf_ptr,
+                                               scratch, opnd, offset);
+#if defined(X86_64) || defined(AARCH64)
+    case OPSZ_4:
+        return trace_buf_insert_buf_store_4bytes(drcontext, buf, ilist, where, buf_ptr,
+                                               scratch, opnd, offset);
+#endif
+    case OPSZ_PTR:
+        return trace_buf_insert_buf_store_ptrsz(drcontext, buf, ilist, where, buf_ptr,
+                                              scratch, opnd, offset);
+    default: assert(false); return false;
+    }
+}
+
+void insert_load(void *drcontext, instrlist_t *ilist, instr_t *where, reg_id_t dst,
+            reg_id_t src, int offset, opnd_size_t opsz)
+{
+    switch (opsz) {
+    case OPSZ_1:
+        MINSERT(ilist, where,
+                XINST_CREATE_load_1byte(
+                    drcontext, opnd_create_reg(reg_resize_to_opsz(dst, opsz)),
+                    opnd_create_base_disp(src, DR_REG_NULL, 0, offset, opsz)));
+        break;
+    case OPSZ_2:
+        MINSERT(ilist, where,
+                XINST_CREATE_load_2bytes(
+                    drcontext, opnd_create_reg(reg_resize_to_opsz(dst, opsz)),
+                    opnd_create_base_disp(src, DR_REG_NULL, 0, offset, opsz)));
+        break;
+    case OPSZ_4:
+#if defined(X86_64) || defined(AARCH64)
+    case OPSZ_8:
+#endif
+        MINSERT(ilist, where,
+                XINST_CREATE_load(drcontext,
+                                  opnd_create_reg(reg_resize_to_opsz(dst, opsz)),
+                                  opnd_create_base_disp(src, DR_REG_NULL, 0, offset, opsz)));
+        break;
+    default: DR_ASSERT(false); break;
+    }
+}
