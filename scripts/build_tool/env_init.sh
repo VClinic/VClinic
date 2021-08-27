@@ -22,6 +22,10 @@ echo -e "Linking source files and cmakefiles.."
 rm -rf $DYNAMORIO_EXT_PATH/drcctlib
 ln -s $DRCCTLIB_PATH $DYNAMORIO_EXT_PATH/drcctlib
 
+# link vprofile src to dynamorio ext path
+rm -rf $DYNAMORIO_EXT_PATH/vprofile
+ln -s $DRCCTLIB_PATH $DYNAMORIO_EXT_PATH/vprofile
+
 # link cmakelists to dynamorio ext path
 if [ ! -f $DYNAMORIO_EXT_PATH/CMakeLists.txt.back ]; then
     if [ -f $DYNAMORIO_EXT_PATH/CMakeLists.txt ]; then
