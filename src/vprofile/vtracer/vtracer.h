@@ -1,6 +1,8 @@
 #ifndef __VTRACER_H__
 #define __VTRACER_H__
 
+#include <dr_api.h>
+
 /* Low-level VTracer Interfaces for VProfile Framework */
 struct _trace_buf_t;
 typedef _trace_buf_t vtrace_buffer_t;
@@ -9,31 +11,151 @@ typedef void (*vtracer_buf_full_cb_t)(void *buf_base, void *buf_end);
 typedef size_t (*vtracer_buf_fill_num_cb_t)(void *drcontext, instr_t *where);
 
 /* VTracer Interface Functions */
+
+/* Initialize VTracer. Return false when any failure detected. */
 bool vtracer_init(void);
+/* Clear and free all the resourced allocated by VTracer. */
 void vtracer_fini(void);
 
-/*  */
+/**
+ * Create trace buffer with size specified as buffer_size:
+ * @param buffer_size: buffer size in bytes for trace buffer
+ *
+ * This routine will create trace buffer with NULL callbacks registered:
+ * @see vtracer_create_trace_buffer_ex(buffer_size, NULL, NULL)
+ *
+ * Return value: a newly created trace buffer pointer with the given size;
+ * return NULL when an failure detected. */
+vtrace_buffer_t *vtracer_create_trace_buffer(size_t buffer_size);
+
+/**
+ * Create trace buffer with additional callbacks:
+ * @param buffer_size: buffer size in bytes for trace buffer.
+ * @param full_cb: the callback to register which will be called to update with
+ * the buffered trace when the trace buffer is detected as full.
+ * May only be NULL when @see fill_num_cb is NULL; otherwise assert for usage
+ * error.
+ * @param fill_num_cb: the callback to register which will be called during
+ * analysis phase to obtain how many slots (elements) will be filled in for the
+ * given instruction.
+ * May only be NULL when @see full_cb is NULL; otherwise assert for usage error.
+ *
+ * With a given non-NULL callbacks, VTracer will guarantee that the full_cb will
+ * be called once the trace buffer is detected as full, and fill_num_cb is used
+ * to estimate the filled in slots for detecting potential trace buffer
+ * overflow. When the VTracer detects any inconsistancy of estimated filled in
+ * number given by fill_num_cb and actual filled in slots (expensive check only
+ * in DEBUG mode), it will assert for a usage error with sufficient information
+ * for further debugging.
+ *
+ * Return value: a newly created trace buffer pointer with the given size and
+ * registered callbacks; return NULL when an failure detected. */
 vtrace_buffer_t *
-vtracer_create_trace_buffer(size_t buffer_size);
-/*  */
-vtrace_buffer_t *
-vtracer_create_trace_buffer_ex(size_t buffer_size, vtracer_buf_full_cb_t full_cb,
+vtracer_create_trace_buffer_ex(size_t buffer_size,
+                               vtracer_buf_full_cb_t full_cb,
                                vtracer_buf_fill_num_cb_t fill_num_cb);
-/*  */
-bool
-vtracer_buffer_free(vtrace_buffer_t *buf);
+/**
+ * Free all resources allocated for this vtrace buffer: @param buf */
+void vtracer_buffer_free(vtrace_buffer_t *buf);
 
 /* TODO: May need to extend API to support more sampling methods */
-/* Configure for bursty sampling */
+/* Sampling Configurations */
+/**
+ * Enable sampling (bursty sampling) for specified vtrace buffer:
+ * @param vtrace_buffer: sampled vtrace buffer with bursty sampling method.
+ * @param window_enable: sample window size to enable value tracing & updating.
+ * @param window_disable: non-sample window size to disable value tracing &
+ * updating.
+ *
+ * The sample rate can be calculated as:
+ *       window_enable / window_disable
+ * The sampling window is applied in the number of executed instructions. */
 void vtracer_enable_sampling(vtrace_buffer_t *vtrace_buffer, int window_enable,
                              int window_disable);
+
+/* Disable sampling for vtracer buffer. */
 void vtracer_disable_sampling(vtrace_buffer_t *vtrace_buffer);
+
+/**
+ * Get the sampling state of vtrace buffer:
+ * @param vtrace_buffer: the target vtrace buffer to query the sampling state;
+ * @param window_enable: if not NULL, it will store the returned value
+ * indicating the registered window_enable value; May be NULL if not wanted.
+ * @param window_disable: if not NULL, it will store the returned value
+ * indicating the registered window_disable value; May be NULL if not wanted.
+ *
+ * Return true if sampling enabled; otherwise return false. */
 bool vtracer_get_sampling_state(vtrace_buffer_t *vtrace_buffer,
                                 int *window_enable, int *window_disable);
 
-/* store values of ref into vtrace_buffer, where ref can be: register/memory/immediate operand */
-void vtracer_insert_trace_val(void* drcontext, instr_t* where, instrlist_t* ilist, opnd_t ref, vtrace_buffer_t* vtrace_buffer, ushort offset);
+/**
+ * Get the current trace buffer pointer in the given register:
+ * @param vtrace_buffer: the vtrace buffer to query the pointer value
+ * @param reg_ptr: the target register to store the current trace buffer of
+ * vtrace_buffer. The register should be reserved by the caller.
+ *
+ * The instrumentation will be inserted before @param where in @param ilist */
+void vtracer_get_trace_buffer_in_reg(void *drcontext, instr_t *where,
+                                     instrlist_t *ilist,
+                                     vtrace_buffer_t *vtrace_buffer,
+                                     reg_id_t reg_ptr);
 
-template<typename T>
-void vtracer_insert_trace_constant(void* drcontext, instr_t* where, instrlist_t* ilist, T val, vtrace_buffer_t* vtrace_buffer, ushort offset);
+/**
+ * Move the trace buffer pointer forward and store back to the vtrace_buffer if
+ * valid:
+ * @param size: the size in bytes to move forward the trace buffer pointer in
+ * reg_ptr.
+ * @param vtrace_buffer: the vtrace buffer to store back the forwarded pointer.
+ * May be NULL when writeback to the vtrace buffer is not expected. In that
+ * case, VTracer will not insert instrumetations to update trace buffer
+ * pointers.
+ * @param reg_ptr: the register to hold the value of current buffer pointer. It
+ * will hold new forwarded buffer pointer if vtrace_buffer is NULL; otherwise
+ * its return value is undefined.
+ * @param scratch: free scratch register given by caller. its return value is
+ * undefined.
+ * */
+void vtracer_insert_trace_forward(void *drcontext, instr_t *where,
+                                  instrlist_t *ilist, int size,
+                                  vtrace_buffer_t *vtrace_buffer,
+                                  reg_id_t reg_ptr, reg_id_t scratch);
+
+/**
+ * Insert instrumentations to store the value of ref into vtrace_buffer, where:
+ * @param ref: can be register/memory/immediate operand
+ * @param reg_ptr: the register to hold the value of current buffer pointer. Its
+ * value will not be modified.
+ * @param scratch: free scratch register given by caller whose return value will
+ * be undefined.
+ * @param offset: offsets to the target domain of a value trace slot.
+ *
+ * In general, this function will insert codes equivilant to:
+ *      <reg_ptr>.<offset> = <ref>
+ * Instrumentation is inserted before @param where.
+ * */
+void vtracer_insert_trace_val(void *drcontext, instr_t *where,
+                              instrlist_t *ilist, opnd_t ref, reg_id_t reg_ptr,
+                              reg_id_t scratch, ushort offset);
+
+/**
+ * Insert instrumentations to store the constant value of type T into
+ * vtrace_buffer:
+ * @param T: the constant value's data type. Only size of 1,2,4,8,16,32,(64 for
+ * AVX512) is supported; otherwise it will result in static assertion failure at
+ * compile time.
+ * @param val: the source constant value for tracing
+ * @param reg_ptr: the register to hold the value of current buffer pointer. Its
+ * value will not be modified.
+ * @param scratch: free scratch register given by caller whose return value will
+ * be undefined.
+ * @param offset: offsets to the target domain of a value trace slot.
+ * 
+ * In general, this function will insert codes equivilant to:
+ *      <reg_ptr>.<offset> = val
+ * Instrumentation is inserted before @param where.
+ * */
+template <typename T>
+void vtracer_insert_trace_constant(void *drcontext, instr_t *where,
+                                   instrlist_t *ilist, T val, reg_id_t reg_ptr,
+                                   reg_id_t scratch, ushort offset);
 #endif
