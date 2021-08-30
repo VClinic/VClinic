@@ -67,6 +67,7 @@ struct val_info_t {
   void *info;
   uint8_t size;
   uint8_t esize;
+  bool is_float;
 };
 
 /****************************************************************/
@@ -107,7 +108,7 @@ bool vprofile_init(bool (*filter)(instr_t *),
                    uint8_t flag);
 
 /* Clear and free all the data used by VProfile */
-void vprofile_fini();
+void vprofile_exit();
 
 /**
  * Register a general value trace with
@@ -176,7 +177,8 @@ vtrace_t* vprofile_register_trace_ex(bool (*filter)(opnd_t),
 /* Allocate a new vprofile trace data structure with the given configurations.
  * Note that the trace buffer is not registered (thus NULL). */
 vtrace_t* vprofile_allocate_trace(bool trace_addr, bool trace_cct,
-                                  bool trace_info, bool strictly_ordered);
+                                  bool trace_info, bool strictly_ordered,
+                                  bool trace_reg_in_memref);
 
 /* Register update callbacks for the specified data_type within the given
  * vtrace. If the vtrace is configured as strictly_ordered, the data_type must
@@ -187,6 +189,27 @@ vtrace_t* vprofile_allocate_trace(bool trace_addr, bool trace_cct,
 void vprofile_register_trace_cb(vtrace_t *vtrace, bool (*filter)(opnd_t),
                                 vprofile_data_t data_type,
                                 void (*update_cb)(val_info_t *));
+
+#define vprofile_register_trace_template_cb(vtrace, filter, update_cb) do {\
+  vprofile_register_trace_cb(vtrace, filter, INT8, update_cb<1,1,false>);\
+  vprofile_register_trace_cb(vtrace, filter, INT16, update_cb<2,2,false>);\
+  vprofile_register_trace_cb(vtrace, filter, INT32, update_cb<4,4,false>);\
+  vprofile_register_trace_cb(vtrace, filter, SPx1, update_cb<4,4,true>);\
+  vprofile_register_trace_cb(vtrace, filter, INT64, update_cb<8,8,false>);\
+  vprofile_register_trace_cb(vtrace, filter, DPx1, update_cb<8,8,true>);\
+  vprofile_register_trace_cb(vtrace, filter, INT128, update_cb<16,1,false>);\
+  vprofile_register_trace_cb(vtrace, filter, INT8x16, update_cb<16,1,false>);\
+  vprofile_register_trace_cb(vtrace, filter, SPx4, update_cb<16,4,true>);\
+  vprofile_register_trace_cb(vtrace, filter, DPx2, update_cb<16,8,true>);\
+  vprofile_register_trace_cb(vtrace, filter, INT256, update_cb<32,1,false>);\
+  vprofile_register_trace_cb(vtrace, filter, INT8x32, update_cb<32,1,false>);\
+  vprofile_register_trace_cb(vtrace, filter, SPx8, update_cb<32,4,true>);\
+  vprofile_register_trace_cb(vtrace, filter, DPx4, update_cb<32,8,true>);\
+  vprofile_register_trace_cb(vtrace, filter, INT512, update_cb<64,1,false>);\
+  vprofile_register_trace_cb(vtrace, filter, INT8x64, update_cb<64,1,false>);\
+  vprofile_register_trace_cb(vtrace, filter, SPx16, update_cb<64,4,true>);\
+  vprofile_register_trace_cb(vtrace, filter, DPx8, update_cb<64,8,true>); \
+} while(0)
 
 /* Clear and free all the data allocated in the given vtrace */
 void vprofile_unregister_trace(vtrace_t *vtrace);

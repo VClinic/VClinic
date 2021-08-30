@@ -15,7 +15,7 @@ typedef size_t (*vtracer_buf_fill_num_cb_t)(void *drcontext, instr_t *where);
 /* Initialize VTracer. Return false when any failure detected. */
 bool vtracer_init(void);
 /* Clear and free all the resourced allocated by VTracer. */
-void vtracer_fini(void);
+void vtracer_exit(void);
 
 /**
  * Create trace buffer with size specified as buffer_size:
