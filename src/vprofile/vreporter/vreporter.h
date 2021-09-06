@@ -42,6 +42,7 @@ public:
 private:
 };
 
+// Generate text report with dr_fprintf
 class VReporterText : public VReporter;
 
 // Generate Result with Format for VProfile In-Editor Visualizer (.json)
