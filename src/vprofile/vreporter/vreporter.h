@@ -8,13 +8,13 @@
 enum {
   TEXT_REPORT = 0,
   JSON_REPORT
-}
+};
 
 enum {
     VREPORTER_NATIVE=0x00,
     VREPORTER_APPEND_PID=0x01,
     VREPORTER_ASYNC=0x02
-}
+};
 
 #define VREPORTER_DEFAULT (VREPORTER_APPEND_PID)
 
@@ -34,7 +34,7 @@ public:
   void metric(const char *name, uint64_t val);
   void metric(const char *name, float val);
   void metric(const char *name, double val);
-  void calling_context(calling_context_t ctxt_hndl);
+  void calling_context(context_handle_t ctxt_hndl);
   void data_object(int32_t data_obj);
 
   void message(const char *msg);
@@ -46,7 +46,7 @@ private:
 class VReporterText : public VReporter;
 
 // Generate Result with Format for VProfile In-Editor Visualizer (.json)
-class VReporterJSON : public VReporter;
+class VReporterJSON : public VReporter{};
 
 typedef VReporter vreporter_t;
 

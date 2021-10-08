@@ -10,6 +10,7 @@ CUR_DIR=$(cd "$(dirname "$0")";pwd)
 
 SRC_PATH=$CUR_DIR/../../src
 DRCCTLIB_PATH=$SRC_PATH/drcctlib
+VPROFILE_PATH=$SRC_PATH/vprofile
 DRCCTLIB_CLIENTS_ROOT_PATH=$SRC_PATH/clients
 DRCCTLIB_CLIENTS_NAME_LIST=$(ls $DRCCTLIB_CLIENTS_ROOT_PATH)
 
@@ -24,7 +25,7 @@ ln -s $DRCCTLIB_PATH $DYNAMORIO_EXT_PATH/drcctlib
 
 # link vprofile src to dynamorio ext path
 rm -rf $DYNAMORIO_EXT_PATH/vprofile
-ln -s $DRCCTLIB_PATH $DYNAMORIO_EXT_PATH/vprofile
+ln -s $VPROFILE_PATH $DYNAMORIO_EXT_PATH/vprofile
 
 # link cmakelists to dynamorio ext path
 if [ ! -f $DYNAMORIO_EXT_PATH/CMakeLists.txt.back ]; then

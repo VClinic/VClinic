@@ -1,9 +1,3 @@
-# **********************************************************
-# Copyright (c) 2020 Xuhpclab. All rights reserved.
-# Licensed under the MIT License.
-# See LICENSE file for more information.
-#  **********************************************************
-
 cmake_minimum_required(VERSION 2.6)
 
 include(../make/policies.cmake NO_POLICY_SCOPE)
@@ -93,6 +87,7 @@ add_subdirectory(drutil)
 add_subdirectory(droption)
 add_subdirectory(drcovlib)
 add_subdirectory(drcctlib)
+add_subdirectory(vprofile)
 
 # documentation is put into main DR docs/ dir
 

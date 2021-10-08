@@ -1,9 +1,3 @@
-# **********************************************************
-# Copyright (c) 2020-2021 Xuhpclab. All rights reserved.
-# Licensed under the MIT License.
-# See LICENSE file for more information.
-#  **********************************************************
-
 cmake_minimum_required(VERSION 2.6)
 
 include(../../make/policies.cmake NO_POLICY_SCOPE)
@@ -19,6 +13,7 @@ set(DynamoRIO_USE_LIBC OFF)
 
 set(srcs
   vprofile.cpp
+  vtracer/vtracer.cpp
   )
 set(srcs_static ${srcs})
 
@@ -48,3 +43,5 @@ use_DynamoRIO_extension(vprofile_static drreg_static)
 use_DynamoRIO_extension(vprofile_static drcctlib_static)
 
 install_ext_header(vprofile.h)
+install_ext_header(vtracer/vtracer.h)
+install_ext_header(vtracer/vtracer_define.h)

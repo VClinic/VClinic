@@ -2,9 +2,10 @@
 #define __VPROFILE_H__
 
 #include "drcctlib.h"
-#include "vlogger/vlogger.h"
-#include "vreporter/vreporter.h"
+// #include "vlogger/vlogger.h"
+// #include "vreporter/vreporter.h"
 #include "vtracer/vtracer.h"
+#include "vtracer/vtracer_define.h"
 /* High-level Interfaces for VProfile Framework */
 
 /* vprofile modes */

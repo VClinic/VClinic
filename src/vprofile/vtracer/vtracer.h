@@ -1,7 +1,15 @@
 #ifndef __VTRACER_H__
 #define __VTRACER_H__
 
-#include <dr_api.h>
+enum {
+    /** Priority of drx_buf thread init event */
+    DRMGR_PRIORITY_THREAD_INIT_TRACE_BUF = -7500,
+    /** Priority of drx_buf thread exit event */
+    DRMGR_PRIORITY_THREAD_EXIT_TRACE_BUF = -7500,
+};
+
+#define DRMGR_PRIORITY_NAME_TRACE_BUF_INIT "vtracer.init"
+#define DRMGR_PRIORITY_NAME_TRACE_BUF_EXIT "vtracer.exit"
 
 /* Low-level VTracer Interfaces for VProfile Framework */
 struct _trace_buf_t;
@@ -13,8 +21,10 @@ typedef size_t (*vtracer_buf_fill_num_cb_t)(void *drcontext, instr_t *where);
 /* VTracer Interface Functions */
 
 /* Initialize VTracer. Return false when any failure detected. */
+DR_EXPORT
 bool vtracer_init(void);
 /* Clear and free all the resourced allocated by VTracer. */
+DR_EXPORT
 void vtracer_exit(void);
 
 /**
@@ -26,6 +36,7 @@ void vtracer_exit(void);
  *
  * Return value: a newly created trace buffer pointer with the given size;
  * return NULL when an failure detected. */
+DR_EXPORT
 vtrace_buffer_t *vtracer_create_trace_buffer(size_t buffer_size);
 
 /**
@@ -50,12 +61,14 @@ vtrace_buffer_t *vtracer_create_trace_buffer(size_t buffer_size);
  *
  * Return value: a newly created trace buffer pointer with the given size and
  * registered callbacks; return NULL when an failure detected. */
+DR_EXPORT
 vtrace_buffer_t *
 vtracer_create_trace_buffer_ex(size_t buffer_size,
                                vtracer_buf_full_cb_t full_cb,
                                vtracer_buf_fill_num_cb_t fill_num_cb);
 /**
  * Free all resources allocated for this vtrace buffer: @param buf */
+DR_EXPORT
 void vtracer_buffer_free(vtrace_buffer_t *buf);
 
 /* TODO: May need to extend API to support more sampling methods */
@@ -70,11 +83,13 @@ void vtracer_buffer_free(vtrace_buffer_t *buf);
  * The sample rate can be calculated as:
  *       window_enable / window_disable
  * The sampling window is applied in the number of executed instructions. */
-void vtracer_enable_sampling(vtrace_buffer_t *vtrace_buffer, int window_enable,
+DR_EXPORT
+void vtracer_enable_sampling(int window_enable,
                              int window_disable);
 
 /* Disable sampling for vtracer buffer. */
-void vtracer_disable_sampling(vtrace_buffer_t *vtrace_buffer);
+DR_EXPORT
+void vtracer_disable_sampling();
 
 /**
  * Get the sampling state of vtrace buffer:
@@ -85,8 +100,8 @@ void vtracer_disable_sampling(vtrace_buffer_t *vtrace_buffer);
  * indicating the registered window_disable value; May be NULL if not wanted.
  *
  * Return true if sampling enabled; otherwise return false. */
-bool vtracer_get_sampling_state(vtrace_buffer_t *vtrace_buffer,
-                                int *window_enable, int *window_disable);
+DR_EXPORT
+bool vtracer_get_sampling_state(void *drcontext);
 
 /**
  * Get the current trace buffer pointer in the given register:
@@ -95,6 +110,7 @@ bool vtracer_get_sampling_state(vtrace_buffer_t *vtrace_buffer,
  * vtrace_buffer. The register should be reserved by the caller.
  *
  * The instrumentation will be inserted before @param where in @param ilist */
+DR_EXPORT
 void vtracer_get_trace_buffer_in_reg(void *drcontext, instr_t *where,
                                      instrlist_t *ilist,
                                      vtrace_buffer_t *vtrace_buffer,
@@ -115,10 +131,30 @@ void vtracer_get_trace_buffer_in_reg(void *drcontext, instr_t *where,
  * @param scratch: free scratch register given by caller. its return value is
  * undefined.
  * */
+DR_EXPORT
 void vtracer_insert_trace_forward(void *drcontext, instr_t *where,
                                   instrlist_t *ilist, int size,
                                   vtrace_buffer_t *vtrace_buffer,
                                   reg_id_t reg_ptr, reg_id_t scratch);
+
+void
+vtracer_insert_load_buf_ptr(void *drcontext, vtrace_buffer_t *buf, instrlist_t *ilist,
+                            instr_t *where, reg_id_t buf_ptr);
+
+void
+vtracer_insert_load_buf_end(void *drcontext, vtrace_buffer_t *buf, instrlist_t *ilist,
+                            instr_t *where, reg_id_t buf_ptr);
+
+void
+vtracer_insert_clear_buf(void *drcontext, vtrace_buffer_t *buf, instrlist_t *ilist,
+                            instr_t *where, reg_id_t scratch);
+DR_EXPORT
+void *
+vtracer_get_buf_ptr(void *drcontext, vtrace_buffer_t *buf);
+
+DR_EXPORT
+void *
+vtracer_get_buf_base(void *drcontext, vtrace_buffer_t *buf);
 
 /**
  * Insert instrumentations to store the value of ref into vtrace_buffer, where:
@@ -133,6 +169,7 @@ void vtracer_insert_trace_forward(void *drcontext, instr_t *where,
  *      <reg_ptr>.<offset> = <ref>
  * Instrumentation is inserted before @param where.
  * */
+DR_EXPORT
 void vtracer_insert_trace_val(void *drcontext, instr_t *where,
                               instrlist_t *ilist, opnd_t ref, reg_id_t reg_ptr,
                               reg_id_t scratch, ushort offset);
@@ -155,7 +192,17 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
  * Instrumentation is inserted before @param where.
  * */
 template <typename T>
+DR_EXPORT
 void vtracer_insert_trace_constant(void *drcontext, instr_t *where,
                                    instrlist_t *ilist, T val, reg_id_t reg_ptr,
                                    reg_id_t scratch, ushort offset);
+
+/**
+ * Mark some instructions like nop are ignorable.
+ * @param ins: instruction for checking.
+ * 
+ * return true if ins is ignorable.
+ * */
+DR_EXPORT
+bool instr_is_ignorable(instr_t *ins);
 #endif

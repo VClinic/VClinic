@@ -6,17 +6,17 @@ vreporter_t* vreport;
 
 logger_t int_freq, sp_freq, dp_freq;
 
-void int_handler((vreporter_t* vreporter, uint64_t& key, uint64_t& data, uint64_t& global) {
+void int_handler(vreporter_t* vreporter, uint64_t& key, uint64_t& data, uint64_t& global) {
     vreporter->metric("Value", key);
     vreporter->metric("Frequency", data, global);
 }
 
-void sp_handler((vreporter_t* vreporter, uint32_t& key, uint64_t& data, uint64_t& global) {
+void sp_handler(vreporter_t* vreporter, uint32_t& key, uint64_t& data, uint64_t& global) {
     vreporter->metric("Value", *reinterpret_cast<float*>(&key));
     vreporter->metric("Frequency", data, global);
 }
 
-void dp_handler((vreporter_t* vreporter, uint64_t& key, uint64_t& data, uint64_t& global) {
+void dp_handler(vreporter_t* vreporter, uint64_t& key, uint64_t& data, uint64_t& global) {
     vreporter->metric("Value", *reinterpret_cast<double*>(&key));
     vreporter->metric("Frequency", data, global);
 }
