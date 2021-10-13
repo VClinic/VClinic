@@ -102,7 +102,7 @@ bool vtracer_get_sampling_state(void *drcontext)
 
 vtrace_buffer_t *vtracer_create_trace_buffer(size_t buffer_size)
 {
-    return vtracer_create_trace_buffer_ex(buffer_size, NULL, NULL);
+    return vtracer_create_trace_buffer_ex(buffer_size, NULL, NULL, NULL, NULL);
 }
 
 vtrace_buffer_t *
