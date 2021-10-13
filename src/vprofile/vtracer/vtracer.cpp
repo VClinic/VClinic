@@ -40,7 +40,9 @@ struct _trace_buf_t {
     uint vec_idx; /* index into the clients vector */
     /* callbacks for buffer checking and updating */
     vtracer_buf_full_cb_t full_cb;
+    void* user_data_full;
     vtracer_buf_fill_num_cb_t fill_num_cb;
+    void* user_data_fill_num;
     /* tls implementation */
     int tls_idx;
     uint tls_offs;
@@ -106,7 +108,9 @@ vtrace_buffer_t *vtracer_create_trace_buffer(size_t buffer_size)
 vtrace_buffer_t *
 vtracer_create_trace_buffer_ex(size_t buffer_size,
                                vtracer_buf_full_cb_t full_cb,
-                               vtracer_buf_fill_num_cb_t fill_num_cb)
+                               void* user_data_full,
+                               vtracer_buf_fill_num_cb_t fill_num_cb,
+                               void* user_data_fill_num)
 {
     vtrace_buffer_t *new_client;
     int tls_idx;
@@ -125,7 +129,9 @@ vtracer_create_trace_buffer_ex(size_t buffer_size,
     new_client = (vtrace_buffer_t*)dr_global_alloc(sizeof(*new_client));
     new_client->buf_size = buffer_size;
     new_client->full_cb  = full_cb;
+    new_client->user_data_full = user_data_full;
     new_client->fill_num_cb = fill_num_cb;
+    new_client->user_data_fill_num = user_data_fill_num;
     new_client->tls_offs = tls_offs;
     new_client->tls_seg = tls_seg;
     new_client->tls_idx = tls_idx;
@@ -314,7 +320,14 @@ static void insert_buf_check(void *drcontext, instrlist_t *bb, instr_t *ins, ush
             // get current buffer end
             vtracer_insert_load_buf_ptr(drcontext, buf, bb, ins, reg_end);
             // insert cleancall for updating the buffered trace
-            dr_insert_clean_call(drcontext, bb, ins, (void*)buf->full_cb, false, 2, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end));
+#ifdef ENABLE_UNSAFE_CLEAN_CALL
+            if(buf->user_data_full==NULL) {
+                // if the user_data is NULL, it is not used by user, so just ignore it
+                dr_insert_clean_call(drcontext, bb, ins, (void*)buf->full_cb, false, 2, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end));
+            } else
+#else
+            dr_insert_clean_call(drcontext, bb, ins, (void*)buf->full_cb, false, 3, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end), OPND_CREATE_INTPTR(buf->user_data_full));
+#endif
             // clear the buffer
             vtracer_insert_clear_buf(drcontext, buf, bb, ins, reg_ptr/*scratch*/);
             // skip to here
@@ -359,7 +372,7 @@ event_basic_block(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, b
         for (i = 0; i < clients.entries; ++i) {
             vtrace_buffer_t *buf = (vtrace_buffer_t*)drvector_get_entry(&clients, i);
             if (buf != NULL && buf->full_cb!=NULL) {
-                scratch[i] += buf->fill_num_cb(drcontext, instr);
+                scratch[i] += buf->fill_num_cb(drcontext, instr, buf->user_data_fill_num);
             }
         }
     }
@@ -433,7 +446,7 @@ event_thread_exit(void *drcontext)
             per_thread_t *data = (per_thread_t*)drmgr_get_tls_field(drcontext, buf->tls_idx);
             if (buf->full_cb!=NULL) {
                 byte *cli_ptr = BUF_PTR(data->seg_base, buf->tls_offs);
-                buf->full_cb(data->cli_base, cli_ptr);
+                buf->full_cb(data->cli_base, cli_ptr, buf->user_data_full);
             }
             dr_raw_mem_free(data->buf_base, data->total_size);
             dr_thread_free(drcontext, data, sizeof(per_thread_t));

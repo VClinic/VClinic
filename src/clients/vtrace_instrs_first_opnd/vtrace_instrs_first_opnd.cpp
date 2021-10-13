@@ -48,7 +48,7 @@ instr_get_first_opnd(instr_t *instr, OUT opnd_t *opnd);
 
 /* Call backs to handle full trace buffers */
 template<class T, int sz, int num>
-void trace_buf_full_cb(void *buf_base, void *buf_end) {
+void trace_buf_full_cb(void *buf_base, void *buf_end, void* user_data) {
     cache_t<sz>* cache_ptr = (cache_t<sz>*)buf_base;
     cache_t<sz>* cache_end = (cache_t<sz>*)buf_end;
     for(; cache_ptr<cache_end; ++cache_ptr) {
@@ -58,7 +58,7 @@ void trace_buf_full_cb(void *buf_base, void *buf_end) {
 }
 
 template<int sz, bool is_float>
-size_t trace_buf_fill_num_cb(void *drcontext, instr_t *where) {
+size_t trace_buf_fill_num_cb(void *drcontext, instr_t *where, void* user_data) {
     size_t fill_num = 0;
     bool is_float_actual = instr_is_floating(where);
     if(!instr_is_app(where) || instr_is_ignorable(where) || (is_float != is_float_actual)) return fill_num;
@@ -76,21 +76,21 @@ size_t trace_buf_fill_num_cb(void *drcontext, instr_t *where) {
 /* Trace Buffer Initialization */
 void TraceBufferInit() {
     // integer buffers
-    trace_buffer[0] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(1), trace_buf_full_cb<uint8_t, 1, 1>, trace_buf_fill_num_cb<1, false>);
-    trace_buffer[1] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(2), trace_buf_full_cb<uint16_t, 2, 1>, trace_buf_fill_num_cb<2, false>);
-    trace_buffer[2] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(4), trace_buf_full_cb<uint32_t, 4, 1>, trace_buf_fill_num_cb<4, false>);
-    trace_buffer[3] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(8), trace_buf_full_cb<uint64_t, 8, 1>, trace_buf_fill_num_cb<8, false>);
-    trace_buffer[4] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(16), trace_buf_full_cb<uint64_t, 16, 2>, trace_buf_fill_num_cb<16, false>);
-    trace_buffer[5] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(32), trace_buf_full_cb<uint64_t, 32, 4>, trace_buf_fill_num_cb<32, false>);
+    trace_buffer[0] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(1), trace_buf_full_cb<uint8_t, 1, 1>, NULL, trace_buf_fill_num_cb<1, false>, NULL);
+    trace_buffer[1] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(2), trace_buf_full_cb<uint16_t, 2, 1>, NULL, trace_buf_fill_num_cb<2, false>, NULL);
+    trace_buffer[2] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(4), trace_buf_full_cb<uint32_t, 4, 1>, NULL, trace_buf_fill_num_cb<4, false>, NULL);
+    trace_buffer[3] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(8), trace_buf_full_cb<uint64_t, 8, 1>, NULL, trace_buf_fill_num_cb<8, false>, NULL);
+    trace_buffer[4] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(16), trace_buf_full_cb<uint64_t, 16, 2>, NULL, trace_buf_fill_num_cb<16, false>, NULL);
+    trace_buffer[5] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(32), trace_buf_full_cb<uint64_t, 32, 4>, NULL, trace_buf_fill_num_cb<32, false>, NULL);
 
     // single floating point buffers
-    trace_buffer[6] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(4), trace_buf_full_cb<float, 4, 1>, trace_buf_fill_num_cb<4, true>);
-    trace_buffer[7] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(16), trace_buf_full_cb<float, 16, 4>, trace_buf_fill_num_cb<16, true>);
-    trace_buffer[8] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(32), trace_buf_full_cb<float, 32, 8>, trace_buf_fill_num_cb<32, true>);
+    trace_buffer[6] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(4), trace_buf_full_cb<float, 4, 1>, NULL, trace_buf_fill_num_cb<4, true>, NULL);
+    trace_buffer[7] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(16), trace_buf_full_cb<float, 16, 4>, NULL, trace_buf_fill_num_cb<16, true>, NULL);
+    trace_buffer[8] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(32), trace_buf_full_cb<float, 32, 8>, NULL, trace_buf_fill_num_cb<32, true>, NULL);
     // double floating point buffers
-    trace_buffer[9] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(8), trace_buf_full_cb<double, 8, 1>, trace_buf_fill_num_cb<8, true>);
-    trace_buffer[10] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(16), trace_buf_full_cb<double, 16, 2>, trace_buf_fill_num_cb<16, true>);
-    trace_buffer[11] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(32), trace_buf_full_cb<double, 32, 4>, trace_buf_fill_num_cb<32, true>);
+    trace_buffer[9] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(8), trace_buf_full_cb<double, 8, 1>, NULL, trace_buf_fill_num_cb<8, true>, NULL);
+    trace_buffer[10] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(16), trace_buf_full_cb<double, 16, 2>, NULL, trace_buf_fill_num_cb<16, true>, NULL);
+    trace_buffer[11] = vtracer_create_trace_buffer_ex(MEM_BUF_SIZE(32), trace_buf_full_cb<double, 32, 4>, NULL, trace_buf_fill_num_cb<32, true>, NULL);
 }
 
 /* Trace Buffer Finalize */

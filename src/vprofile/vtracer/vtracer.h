@@ -15,8 +15,8 @@ enum {
 struct _trace_buf_t;
 typedef _trace_buf_t vtrace_buffer_t;
 
-typedef void (*vtracer_buf_full_cb_t)(void *buf_base, void *buf_end);
-typedef size_t (*vtracer_buf_fill_num_cb_t)(void *drcontext, instr_t *where);
+typedef void (*vtracer_buf_full_cb_t)(void *buf_base, void *buf_end, void* user_data);
+typedef size_t (*vtracer_buf_fill_num_cb_t)(void *drcontext, instr_t *where, void* user_data);
 
 /* VTracer Interface Functions */
 
@@ -32,7 +32,7 @@ void vtracer_exit(void);
  * @param buffer_size: buffer size in bytes for trace buffer
  *
  * This routine will create trace buffer with NULL callbacks registered:
- * @see vtracer_create_trace_buffer_ex(buffer_size, NULL, NULL)
+ * @see vtracer_create_trace_buffer_ex(buffer_size, NULL, NULL, NULL, NULL)
  *
  * Return value: a newly created trace buffer pointer with the given size;
  * return NULL when an failure detected. */
@@ -46,9 +46,15 @@ vtrace_buffer_t *vtracer_create_trace_buffer(size_t buffer_size);
  * the buffered trace when the trace buffer is detected as full.
  * May only be NULL when @see fill_num_cb is NULL; otherwise assert for usage
  * error.
+ * @param user_data_full: the user-specified data for the full_cb callback. This
+ * registered user_data will send as the user_data parameter of full_cb
+ * callback.
  * @param fill_num_cb: the callback to register which will be called during
  * analysis phase to obtain how many slots (elements) will be filled in for the
  * given instruction.
+ * @param user_data_full: the user-specified data for the fill_num_cb callbacks.
+ * This registered user_data will send as the user_data parameter of fill_num_cb
+ * callback.
  * May only be NULL when @see full_cb is NULL; otherwise assert for usage error.
  *
  * With a given non-NULL callbacks, VTracer will guarantee that the full_cb will
@@ -65,7 +71,9 @@ DR_EXPORT
 vtrace_buffer_t *
 vtracer_create_trace_buffer_ex(size_t buffer_size,
                                vtracer_buf_full_cb_t full_cb,
-                               vtracer_buf_fill_num_cb_t fill_num_cb);
+                               void* user_data_full,
+                               vtracer_buf_fill_num_cb_t fill_num_cb,
+                               void *user_data_fill_num);
 /**
  * Free all resources allocated for this vtrace buffer: @param buf */
 DR_EXPORT
