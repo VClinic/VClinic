@@ -1,6 +1,13 @@
 #include "dr_api.h"
 #include "vprofile.h"
 
+vtrace_t* vtrace;
+
+template<int size, int esize, bool is_float>
+void update(val_info_t *info) {
+	return;
+}
+
 static void
 ClientInit(int argc, const char *argv[])
 {
@@ -9,6 +16,7 @@ ClientInit(int argc, const char *argv[])
 static void
 ClientExit(void)
 {
+    vprofile_unregister_trace(vtrace);
     vprofile_exit();
 }
 
@@ -19,11 +27,13 @@ extern "C" {
 DR_EXPORT void
 dr_client_main(client_id_t id, int argc, const char *argv[])
 {
-    dr_set_client_name("DynamoRIO Client 'value_freq'",
+    dr_set_client_name("DynamoRIO Client 'vprofile_all_opnd'",
                        "http://dynamorio.org/issues");
     ClientInit(argc, argv);
-    vprofile_init(VPROFILE_FILTER_ALL_INSTR, NULL, NULL,
+    vprofile_init(VPROFILE_FILTER_ALL_INSTR, NULL, NULL, NULL,
                      VPROFILE_DEFAULT);
+    vtrace = vprofile_allocate_trace(false, false, false, false, false);
+    vprofile_register_trace_template_cb(vtrace, VPROFILE_FILTER_ALL_OPND, update);
     dr_register_exit_event(ClientExit);
 }
 

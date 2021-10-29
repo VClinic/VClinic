@@ -11,12 +11,23 @@ enum {
 #define DRMGR_PRIORITY_NAME_TRACE_BUF_INIT "vtracer.init"
 #define DRMGR_PRIORITY_NAME_TRACE_BUF_EXIT "vtracer.exit"
 
-/* Low-level VTracer Interfaces for VProfile Framework */
-struct _trace_buf_t;
-typedef _trace_buf_t vtrace_buffer_t;
-
 typedef void (*vtracer_buf_full_cb_t)(void *buf_base, void *buf_end, void* user_data);
 typedef size_t (*vtracer_buf_fill_num_cb_t)(void *drcontext, instr_t *where, void* user_data);
+
+/* Low-level VTracer Interfaces for VProfile Framework */
+typedef struct {
+    uint buf_size;
+    uint vec_idx; /* index into the clients vector */
+    /* callbacks for buffer checking and updating */
+    vtracer_buf_full_cb_t full_cb;
+    void* user_data_full;
+    vtracer_buf_fill_num_cb_t fill_num_cb;
+    void* user_data_fill_num;
+    /* tls implementation */
+    int tls_idx;
+    uint tls_offs;
+    reg_id_t tls_seg;
+} vtrace_buffer_t;
 
 /* VTracer Interface Functions */
 
@@ -37,7 +48,7 @@ void vtracer_exit(void);
  * Return value: a newly created trace buffer pointer with the given size;
  * return NULL when an failure detected. */
 DR_EXPORT
-vtrace_buffer_t *vtracer_create_trace_buffer(size_t buffer_size);
+vtrace_buffer_t *vtracer_create_trace_buffer(uint buffer_size);
 
 /**
  * Create trace buffer with additional callbacks:
@@ -69,7 +80,7 @@ vtrace_buffer_t *vtracer_create_trace_buffer(size_t buffer_size);
  * registered callbacks; return NULL when an failure detected. */
 DR_EXPORT
 vtrace_buffer_t *
-vtracer_create_trace_buffer_ex(size_t buffer_size,
+vtracer_create_trace_buffer_ex(uint buffer_size,
                                vtracer_buf_full_cb_t full_cb,
                                void* user_data_full,
                                vtracer_buf_fill_num_cb_t fill_num_cb,

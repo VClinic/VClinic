@@ -21,7 +21,9 @@
 enum {
     TRACE_BUF_TLS_OFFS_BUF_PTR,
     TRACE_BUF_TLS_OFFS_BUF_END,
-    TRACE_BUF_TLS_OFFS_BUF_BASE,
+    // The buffer base can be calculated from buffer end with statically known buffer size
+    // so no need to waste the restricted tls slots for fast storage.
+    // TRACE_BUF_TLS_OFFS_BUF_BASE,
     TRACE_BUF_TLS_COUNT
 };
 
@@ -34,20 +36,6 @@ typedef struct {
     ushort scratch;
 #endif
 } per_thread_t;
-
-struct _trace_buf_t {
-    size_t buf_size;
-    uint vec_idx; /* index into the clients vector */
-    /* callbacks for buffer checking and updating */
-    vtracer_buf_full_cb_t full_cb;
-    void* user_data_full;
-    vtracer_buf_fill_num_cb_t fill_num_cb;
-    void* user_data_fill_num;
-    /* tls implementation */
-    int tls_idx;
-    uint tls_offs;
-    reg_id_t tls_seg;
-};
 
 /* global TLS implementation */
 enum {
@@ -87,6 +75,13 @@ void vtracer_enable_sampling(int win_enable,
     enable_sampling = true;
     window_enable = win_enable;
     window_disable = win_disable;
+    // only register restricted tls resources when needed
+    if(tls_idx==-1) {
+        tls_idx = drmgr_register_tls_field();
+        DR_ASSERT_MSG(tls_idx!=-1, "vtracer_enable_sampling: drmgr_register_tls_field failed!\n");
+        if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, INSTRACE_TLS_COUNT, 0))
+            DR_ASSERT_MSG(false, "vtracer_enable_sampling: dr_raw_tls_calloc failed!\n");
+    }
 }
 
 void vtracer_disable_sampling()
@@ -96,17 +91,18 @@ void vtracer_disable_sampling()
 
 bool vtracer_get_sampling_state(void *drcontext)
 {
+    DR_ASSERT_MSG(enable_sampling, "vtracer_get_sampling_state usage error: must called after vtracer_enable_sampling!");
     ins_per_thread_t *pt = (ins_per_thread_t*)drmgr_get_tls_field(drcontext, tls_idx);
     return (size_t)BUF_PTR(pt->numInsBuff, tls_offs) < (size_t)window_enable;
 }
 
-vtrace_buffer_t *vtracer_create_trace_buffer(size_t buffer_size)
+vtrace_buffer_t *vtracer_create_trace_buffer(uint buffer_size)
 {
     return vtracer_create_trace_buffer_ex(buffer_size, NULL, NULL, NULL, NULL);
 }
 
 vtrace_buffer_t *
-vtracer_create_trace_buffer_ex(size_t buffer_size,
+vtracer_create_trace_buffer_ex(uint buffer_size,
                                vtracer_buf_full_cb_t full_cb,
                                void* user_data_full,
                                vtracer_buf_fill_num_cb_t fill_num_cb,
@@ -265,6 +261,7 @@ static void insert_buf_check(void *drcontext, instrlist_t *bb, instr_t *ins, ush
     if (enable_sampling) {
         instr_t* skip_to_update = INSTR_CREATE_label(drcontext);
         dr_insert_read_raw_tls(drcontext, bb, ins, tls_seg, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR, reg_ptr);
+        // TODO: use JECXZ (x86)/TBZ (arm) for aflag-free comparison & conditional jump
         // Clear insCnt when insCnt > WINDOW_DISABLE
 #if defined(ARM) || defined(AARCH64)
     #ifdef AARCH64
@@ -311,25 +308,25 @@ static void insert_buf_check(void *drcontext, instrlist_t *bb, instr_t *ins, ush
                     XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr),
                                      OPND_CREATE_INT16(scratch[i])));
             // if buffer will not be full, we will skip the heavy update
+            // TODO: use JECXZ (x86)/TBZ (arm) for aflag-free comparison & conditional jump
             MINSERT(bb, ins, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
             MINSERT(bb, ins, XINST_CREATE_jump_cond(drcontext, DR_PRED_LT, opnd_create_instr(skip_update)));
-            // get current buffer base
-            dr_insert_read_raw_tls(drcontext, bb, ins, buf->tls_seg,
-                           buf->tls_offs + sizeof(void *) * TRACE_BUF_TLS_OFFS_BUF_BASE,
-                           reg_ptr);
+            // // get current buffer base
+            // dr_insert_read_raw_tls(drcontext, bb, ins, buf->tls_seg,
+            //                buf->tls_offs + sizeof(void *) * TRACE_BUF_TLS_OFFS_BUF_BASE,
+            //                reg_ptr);
             // get current buffer end
-            vtracer_insert_load_buf_ptr(drcontext, buf, bb, ins, reg_end);
+            //vtracer_insert_load_buf_ptr(drcontext, buf, bb, ins, reg_end);
+            // reg_ptr = reg_end - buf->buf_size
+            MINSERT(bb, ins, XINST_CREATE_move(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
+            MINSERT(bb, ins, XINST_CREATE_sub(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(buf->buf_size)));
             // insert cleancall for updating the buffered trace
-#ifdef ENABLE_UNSAFE_CLEAN_CALL
-            if(buf->user_data_full==NULL) {
-                // if the user_data is NULL, it is not used by user, so just ignore it
-                dr_insert_clean_call(drcontext, bb, ins, (void*)buf->full_cb, false, 2, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end));
-            } else
-#else
             dr_insert_clean_call(drcontext, bb, ins, (void*)buf->full_cb, false, 3, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end), OPND_CREATE_INTPTR(buf->user_data_full));
-#endif
             // clear the buffer
-            vtracer_insert_clear_buf(drcontext, buf, bb, ins, reg_ptr/*scratch*/);
+            //vtracer_insert_clear_buf(drcontext, buf, bb, ins, reg_ptr/*scratch*/);
+            // fast clear the buffer with the restored buf base in reg_ptr
+            dr_insert_write_raw_tls(drcontext, bb, ins, buf->tls_seg, buf->tls_offs,
+                            reg_ptr);
             // skip to here
             MINSERT(bb, ins, skip_update);
         }
@@ -367,7 +364,7 @@ event_basic_block(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, b
     }
     // estimate the future fill in slot numbers of each buffer
     for (instr = instrlist_first(bb); instr != NULL; instr = instr_get_next(instr)) {
-        if(!instr_is_app(instr)) continue;
+        if(!instr_is_app(instr) || instr_is_ignorable(instr)) continue;
         num_instructions++;
         for (i = 0; i < clients.entries; ++i) {
             vtrace_buffer_t *buf = (vtrace_buffer_t*)drvector_get_entry(&clients, i);
@@ -409,10 +406,12 @@ void
 event_thread_init(void *drcontext)
 {
     // allocate raw tls field for fast update for sampling
-    ins_per_thread_t *pt = (ins_per_thread_t *)dr_thread_alloc(drcontext, sizeof(ins_per_thread_t));
-    pt->numInsBuff = (byte*)dr_get_dr_segment_base(tls_seg);
-    BUF_PTR(pt->numInsBuff, tls_offs) = 0;
-    drmgr_set_tls_field(drcontext, tls_idx, (void *)pt);
+    if(tls_idx!=-1) {
+        ins_per_thread_t *pt = (ins_per_thread_t *)dr_thread_alloc(drcontext, sizeof(ins_per_thread_t));
+        pt->numInsBuff = (byte*)dr_get_dr_segment_base(tls_seg);
+        BUF_PTR(pt->numInsBuff, tls_offs) = 0;
+        drmgr_set_tls_field(drcontext, tls_idx, (void *)pt);
+    }
     // allcoate tls field for each buffer
     unsigned int i;
     for (i = 0; i < clients.entries; ++i) {
@@ -425,9 +424,9 @@ event_thread_init(void *drcontext)
             BUF_PTR(data->seg_base,
                     buf->tls_offs + sizeof(void *) * TRACE_BUF_TLS_OFFS_BUF_END) =
                 data->cli_base + buf->buf_size;
-            BUF_PTR(data->seg_base,
-                    buf->tls_offs + sizeof(void *) * TRACE_BUF_TLS_OFFS_BUF_BASE) =
-                data->cli_base;
+            // BUF_PTR(data->seg_base,
+            //         buf->tls_offs + sizeof(void *) * TRACE_BUF_TLS_OFFS_BUF_BASE) =
+            //     data->cli_base;
         }
     }
 }
@@ -435,9 +434,11 @@ event_thread_init(void *drcontext)
 void
 event_thread_exit(void *drcontext)
 {
-    // free raw tls field for fast update for sampling
-    ins_per_thread_t *pt = (ins_per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
-    dr_thread_free(drcontext, pt, sizeof(ins_per_thread_t));
+    if(tls_idx!=-1) {
+        // free raw tls field for fast update for sampling
+        ins_per_thread_t *pt = (ins_per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+        dr_thread_free(drcontext, pt, sizeof(ins_per_thread_t));
+    }
     // free tls field of each buffer
     unsigned int i;
     for (i = 0; i < clients.entries; ++i) {
@@ -512,11 +513,7 @@ vtracer_init(void)
         !drmgr_register_bb_instrumentation_event(event_basic_block, NULL, NULL)
         )
         return false;
-    tls_idx = drmgr_register_tls_field();
-    if (tls_idx == -1)
-        return false;
-    if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, INSTRACE_TLS_COUNT, 0))
-        return false;
+    tls_idx = -1;
     return true;
 }
 
@@ -526,9 +523,10 @@ vtracer_exit(void)
     drmgr_unregister_thread_init_event(event_thread_init);
     drmgr_unregister_thread_exit_event(event_thread_exit);
     drmgr_unregister_bb_instrumentation_event(event_basic_block);
-    drmgr_unregister_tls_field(tls_idx);
-
-    dr_raw_tls_cfree(tls_offs, INSTRACE_TLS_COUNT);
+    if(tls_idx!=-1) {
+        drmgr_unregister_tls_field(tls_idx);
+        dr_raw_tls_cfree(tls_offs, INSTRACE_TLS_COUNT);
+    }
     drvector_delete(&clients);
 
     drutil_exit();
@@ -557,8 +555,9 @@ vtracer_insert_clear_buf(void *drcontext, vtrace_buffer_t *buf, instrlist_t *ili
                             instr_t *where, reg_id_t scratch)
 {
     dr_insert_read_raw_tls(drcontext, ilist, where, buf->tls_seg,
-                           buf->tls_offs + sizeof(void *) * TRACE_BUF_TLS_OFFS_BUF_BASE,
+                           buf->tls_offs + sizeof(void *) * TRACE_BUF_TLS_OFFS_BUF_END,
                            scratch);
+    MINSERT(ilist, where, XINST_CREATE_sub(drcontext, opnd_create_reg(scratch), OPND_CREATE_INT32(buf->buf_size)));
     dr_insert_write_raw_tls(drcontext, ilist, where, buf->tls_seg, buf->tls_offs,
                             scratch);
 }
@@ -967,6 +966,15 @@ void insert_trace_value_in_simd(void *drcontext, instrlist_t *ilist, instr_t *wh
                                                                 offset, OPSZ_1),
                                           opnd_create_reg(reg_simd), opnd_create_immed_int(0, OPSZ_1)));
           break;
+        case 2:
+          assert(reg_is_strictly_xmm(reg_simd) || reg_is_mmx(reg_simd));
+          MINSERT(ilist, where,
+                  INSTR_CREATE_pextrw(drcontext,
+                                          opnd_create_base_disp(reg_ptr,
+                                                                DR_REG_NULL, 0,
+                                                                offset, OPSZ_2),
+                                          opnd_create_reg(reg_simd), opnd_create_immed_int(0, OPSZ_1)));
+          break;
         case 4:
           assert(reg_is_strictly_xmm(reg_simd) || reg_is_mmx(reg_simd));
           MINSERT(ilist, where,
@@ -1127,6 +1135,10 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
                     // vpbroadcast
                     insert_trace_for_simd<1>(drcontext, ilist, where, ref, offset, reg_ptr);
                     break;
+                case 2:
+                    // pextrw
+                    insert_trace_for_simd<2>(drcontext, ilist, where, ref, offset, reg_ptr);
+                    break;
                 case 4:
                     insert_trace_for_simd<4>(drcontext, ilist, where, ref, offset, reg_ptr);
                     break;
@@ -1152,6 +1164,9 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
     } else if(opnd_is_immed(ref)) {
         // get the immediate value and check it statically
         insert_trace_for_imm(drcontext, ilist, where, ref, offset, opnd_get_size(ref), reg_ptr, scratch);
+    } else if(opnd_is_pc(ref)) {
+        // TODO: Not implemented
+        return;
     } else {
         assert(false && "Unknown operand type!\n");
     }

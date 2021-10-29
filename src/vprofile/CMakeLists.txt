@@ -43,5 +43,6 @@ use_DynamoRIO_extension(vprofile_static drreg_static)
 use_DynamoRIO_extension(vprofile_static drcctlib_static)
 
 install_ext_header(vprofile.h)
+install_ext_header(vprofile_filter_func_list.h)
 install_ext_header(vtracer/vtracer.h)
 install_ext_header(vtracer/vtracer_define.h)
