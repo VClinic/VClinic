@@ -41,3 +41,23 @@
     } } while(0)
 
 #endif
+
+inline void getUnusedRegEntry(drvector_t* allowed, opnd_t opnd) {
+    drreg_init_and_fill_vector(allowed, true);
+    // the regs used in this instr is not allowd to spill
+    for (int i = opnd_num_regs_used(opnd) - 1; i >= 0; i--) {
+        reg_id_t reg_used = opnd_get_reg_used(opnd, i);
+        drreg_set_vector_entry(allowed, reg_used, false);
+        // resize for simd or gpr, mmx regs are not supported!
+        // resize for simd may occur error
+#ifdef X86
+        if(!reg_is_gpr(reg_used) || reg_is_simd(reg_used) || reg_is_mmx(reg_used)) {
+            continue;
+        }
+        drreg_set_vector_entry(allowed, reg_resize_to_opsz(reg_used, OPSZ_1), false);
+        drreg_set_vector_entry(allowed, reg_resize_to_opsz(reg_used, OPSZ_2), false);
+        drreg_set_vector_entry(allowed, reg_resize_to_opsz(reg_used, OPSZ_4), false);
+        drreg_set_vector_entry(allowed, reg_resize_to_opsz(reg_used, OPSZ_8), false);
+#endif
+    }
+}

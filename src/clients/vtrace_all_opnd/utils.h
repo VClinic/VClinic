@@ -2,36 +2,6 @@
 #define __UTILS_H__
 #include "dr_api.h"
 
-bool instr_is_reg_copy(instr_t* instr) {
-    if(instr_reads_memory(instr) || instr_writes_memory(instr)) {
-        return false;
-    }
-    if(instr_is_mov(instr)) return true;
-    int opcode = instr_get_opcode(instr);
-    switch(opcode) {
-        case OP_movdqu:
-        case OP_movdqa:
-        case OP_movsd:
-        case OP_movss:
-        case OP_vmovss:
-        case OP_vmovsd:
-        case OP_vmovd:
-        case OP_vmovq:
-        case OP_movd:
-        case OP_movq:
-        case OP_movapd:
-        case OP_movaps:
-        case OP_vmovapd:
-        case OP_vmovaps:
-        case OP_movupd:
-        case OP_movups:
-        case OP_vmovupd:
-        case OP_vmovups:
-            return true;
-    }
-    return false;
-}
-
 // TODO: search for dynamorio interface to obtain element witdh of a SIMD operation
 // As the dynamorio did not provide function to obtain SIMD operation width of each element, Zerospy mannually implements with a lookup table
 #ifdef ARM_CCTLIB
@@ -201,6 +171,23 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
     }
 }
 
+uint32_t
+IntegerOperandSizeTable(instr_t *instr, opnd_t opnd)
+{
+    uint size = opnd_size_in_bytes(opnd_get_size(opnd));
+    if(size!=16 && size!=32 && size!=64) {
+        return size;
+    }
+
+    int opc = instr_get_opcode(instr);
+
+    switch (opc) {
+        default: {
+            return 0;
+        }
+    }
+}
+
 #else
 
 uint32_t
@@ -227,9 +214,59 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
     }
 }
 
+uint32_t
+IntegerOperandSizeTable(instr_t *instr, opnd_t opnd)
+{
+    uint size = opnd_size_in_bytes(opnd_get_size(opnd));
+    if(size!=16 && size!=32 && size!=64) {
+        return size;
+    }
+
+    opnd_t width = instr_get_src(instr, instr_num_srcs(instr) - 1);
+    if (!opnd_is_immed_int(width)) return size;
+
+    int opc = instr_get_opcode(instr);
+
+    switch (opc) {
+        default: {
+            return 0;
+        }
+    }
+}
+
 #endif
 
 #else
+
+bool instr_is_reg_copy(instr_t* instr) {
+    if(instr_reads_memory(instr) || instr_writes_memory(instr)) {
+        return false;
+    }
+    if(instr_is_mov(instr)) return true;
+    int opcode = instr_get_opcode(instr);
+    switch(opcode) {
+        case OP_movdqu:
+        case OP_movdqa:
+        case OP_movsd:
+        case OP_movss:
+        case OP_vmovss:
+        case OP_vmovsd:
+        case OP_vmovd:
+        case OP_vmovq:
+        case OP_movd:
+        case OP_movq:
+        case OP_movapd:
+        case OP_movaps:
+        case OP_vmovapd:
+        case OP_vmovaps:
+        case OP_movupd:
+        case OP_movups:
+        case OP_vmovupd:
+        case OP_vmovups:
+            return true;
+    }
+    return false;
+}
 
 uint32_t
 FloatOperandSizeTable(instr_t *instr, opnd_t opnd)

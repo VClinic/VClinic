@@ -23,6 +23,7 @@ ClientExit(void)
     vprofile_exit();
 }
 
+#if !defined(ARM) && !defined(AARCH64)
 bool VPROFILE_FILTER_PADDB_INSTR(instr_t* instr) {
     int opc = instr_get_opcode(instr);
     int opc_nxt = -1;
@@ -31,24 +32,21 @@ bool VPROFILE_FILTER_PADDB_INSTR(instr_t* instr) {
     return ((opc == OP_paddb && opc_nxt == OP_add) || (opc == OP_paddb && opc_nxt == OP_paddb) || (opc == OP_add && opc_nxt == OP_paddb));
 }
 
-void bb_instrument_cb(void *drcontext, instrlist_t *bb, void *user_data) {
-    instr_disassemble(drcontext, instrlist_first(bb), STDOUT);
-    dr_fprintf(STDOUT, "\n");
+void bb_instrument_cb(void *drcontext, instrlist_t *bb) {
+    // *(uint64_t *) user_data = 1; // can pass!
 }
 
-void ins_instrument_cb(void *drcontext, instr_t *instr, instrlist_t *bb, void *user_data) {
+void ins_instrument_cb(void *drcontext, instr_t *instr, instrlist_t *bb) {
     int opc = instr_get_opcode(instr);
     int opc_nxt = -1;
     if(instr_get_next(instr) != NULL)
     	opc_nxt = instr_get_opcode(instr_get_next(instr));
     if (opc == OP_paddb && opc_nxt == OP_div) {
-        // instr_disassemble(drcontext, instr, STDOUT);
-        // dr_fprintf(STDOUT, "\n");
-        char *name = new char[MAXIMUM_LEN];
-        instr_disassemble_to_buffer(drcontext, instr, name, MAXIMUM_LEN);
-        // vprofile_insert_trace_info(drcontext, instr, bb, vtrace, (void *)name);
+        instr_disassemble(drcontext, instr, STDOUT);
+        dr_fprintf(STDOUT, "\n");
     }
 }
+#endif
 
 template<int size, int esize, bool is_float>
 void update(val_info_t *info) {
@@ -111,8 +109,13 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     dr_set_client_name("DynamoRIO Client 'vprofile_print_value'",
                        "http://dynamorio.org/issues");
     ClientInit(argc, argv);
-    vprofile_init(VPROFILE_FILTER_PADDB_INSTR, NULL, ins_instrument_cb, NULL,
-                     VPROFILE_DEFAULT);
+#if !defined(ARM) && !defined(AARCH64)
+    vprofile_init(VPROFILE_FILTER_ALL_INSTR, NULL, ins_instrument_cb, bb_instrument_cb,
+                     VPROFILE_COLLECT_CCT);
+#else
+    vprofile_init(VPROFILE_FILTER_ALL_INSTR, NULL, NULL, NULL,
+                        VPROFILE_DEFAULT);
+#endif
     vtrace = vprofile_allocate_trace(false, false, false, false, false);
     vprofile_register_trace_template_cb(vtrace, VPROFILE_FILTER_ALL_OPND, update);
     dr_register_exit_event(ClientExit);

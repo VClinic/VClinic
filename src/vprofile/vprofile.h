@@ -65,6 +65,7 @@ struct vtrace_t {
  * caller (e.g., size/esize when not strictly_ordered, no addr info, etc). */
 struct val_info_t {
   uint64_t addr;
+  int32_t ctxt_hndl;
   void *val;
   void *info;
   uint8_t size;
@@ -109,9 +110,9 @@ struct val_info_t {
  */
 DR_EXPORT
 bool vprofile_init(bool (*filter)(instr_t *),
-                   void* (*user_data_cb)(void *, instr_t *, instrlist_t *, opnd_t, void*),
-                   void (*ins_instrument_cb)(void *, instr_t *, instrlist_t *, void*),
-                   void (*bb_instrument_cb)(void *, instrlist_t *, void*),
+                   void* (*user_data_cb)(void *, instr_t *, instrlist_t *, opnd_t),
+                   void (*ins_instrument_cb)(void *, instr_t *, instrlist_t *),
+                   void (*bb_instrument_cb)(void *, instrlist_t *),
                    uint8_t flag);
 
 /* Clear and free all the data used by VProfile */

@@ -13,8 +13,8 @@
 #include "drutil.h"
 #include "drwrap.h"
 #include "drvector.h"
-#include "utils.h"
 #include "vprofile.h"
+#include "utils.h"
 
 dr_emit_flags_t
 event_basic_block(void *drcontext, void *tag, instrlist_t *bb,

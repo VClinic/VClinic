@@ -189,12 +189,12 @@ minstr_load_wint_to_reg(void *drcontext, instrlist_t *ilist, instr_t *where, reg
 {
     MINSERT(ilist, where,
             TRACE_LOAD_IMM32_0(drcontext, opnd_create_reg(reg),
-                                  OPND_CREATE_IMMEDIATE_INT(wint_num & 0xffff)));
+                                  OPND_CREATE_INT(wint_num & 0xffff)));
     wint_num = (wint_num >> 16) & 0xffff;
     if(wint_num) {
         MINSERT(ilist, where,
                 TRACE_LOAD_IMM32_16(drcontext, opnd_create_reg(reg),
-                                    OPND_CREATE_IMMEDIATE_INT(wint_num)));
+                                    OPND_CREATE_INT(wint_num)));
     }
 }
 
@@ -205,24 +205,24 @@ minstr_load_wwint_to_reg(void *drcontext, instrlist_t *ilist, instr_t *where,
 {
     MINSERT(ilist, where,
             TRACE_LOAD_IMM32_0(drcontext, opnd_create_reg(reg),
-                                  OPND_CREATE_IMMEDIATE_INT(wwint_num & 0xffff)));
+                                  OPND_CREATE_INT(wwint_num & 0xffff)));
     uint64_t tmp = (wwint_num >> 16) & 0xffff;
     if(tmp) {
         MINSERT(ilist, where,
             TRACE_LOAD_IMM32_16(drcontext, opnd_create_reg(reg),
-                                OPND_CREATE_IMMEDIATE_INT(tmp)));
+                                OPND_CREATE_INT(tmp)));
     }
     tmp = (wwint_num >> 32) & 0xffff;
     if(tmp) {
         MINSERT(ilist, where,
             TRACE_LOAD_IMM32_32(drcontext, opnd_create_reg(reg),
-                                OPND_CREATE_IMMEDIATE_INT(tmp)));
+                                OPND_CREATE_INT(tmp)));
     }
     tmp = (wwint_num >> 48) & 0xffff;
     if(tmp) {
         MINSERT(ilist, where,
             TRACE_LOAD_IMM32_48(drcontext, opnd_create_reg(reg),
-                                OPND_CREATE_IMMEDIATE_INT(tmp)));
+                                OPND_CREATE_INT(tmp)));
     }
 }
 #endif
@@ -293,7 +293,7 @@ static void insert_buf_check(void *drcontext, instrlist_t *bb, instr_t *ins, ush
     for (i = 0; i < clients.entries; ++i) {
         vtrace_buffer_t *buf = (vtrace_buffer_t*)drvector_get_entry(&clients, i);
         if (buf != NULL && buf->full_cb!=NULL && scratch[i]>0) {
-            DR_ASSERT(scratch[i] <= buf->buf_size);
+            DR_ASSERT_MSG(scratch[i] <= buf->buf_size, "The filling number exceed the registered trace buffer size!");
 #ifdef VTRACER_DEBUG
             dr_insert_clean_call(drcontext, bb, ins, (void *) debug_scratch_check, false, 3, OPND_CREATE_INTPTR(buf), OPND_CREATE_INT32(scratch[i]), OPND_CREATE_INT32(i));
 #endif
@@ -311,15 +311,12 @@ static void insert_buf_check(void *drcontext, instrlist_t *bb, instr_t *ins, ush
             // TODO: use JECXZ (x86)/TBZ (arm) for aflag-free comparison & conditional jump
             MINSERT(bb, ins, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
             MINSERT(bb, ins, XINST_CREATE_jump_cond(drcontext, DR_PRED_LT, opnd_create_instr(skip_update)));
-            // // get current buffer base
-            // dr_insert_read_raw_tls(drcontext, bb, ins, buf->tls_seg,
-            //                buf->tls_offs + sizeof(void *) * TRACE_BUF_TLS_OFFS_BUF_BASE,
-            //                reg_ptr);
-            // get current buffer end
-            //vtracer_insert_load_buf_ptr(drcontext, buf, bb, ins, reg_end);
+            // get current buffer base
             // reg_ptr = reg_end - buf->buf_size
             MINSERT(bb, ins, XINST_CREATE_move(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
             MINSERT(bb, ins, XINST_CREATE_sub(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(buf->buf_size)));
+            // get current buffer end
+            vtracer_insert_load_buf_ptr(drcontext, buf, bb, ins, reg_end);
             // insert cleancall for updating the buffered trace
             dr_insert_clean_call(drcontext, bb, ins, (void*)buf->full_cb, false, 3, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end), OPND_CREATE_INTPTR(buf->user_data_full));
             // clear the buffer
@@ -745,9 +742,20 @@ vtrace_buf_insert_buf_store(void *drcontext, instrlist_t *ilist,
                          opnd_size_t opsz, short offset)
 {
     switch (opsz) {
+#if defined(AARCH64)
+    // case OPSZ_2b for optional shift(lsl lsr...) in arm, treat it as 1 bytes e.g. add    %sp $0x0000 **lsl** $0x00 -> %x0
+    case OPSZ_2b:
+    // case OPSZ_5b for shift(lsl lsr...) amount in arm, treat it as 1 bytes e.g. add    %sp $0x0000 lsl **$0x00** -> %x0
+    case OPSZ_5b:
+#endif
+        // what is OPSZ_2b?
     case OPSZ_1:
         return vtrace_buf_insert_buf_store_1byte(drcontext, ilist, where, buf_ptr,
                                               scratch, opnd, offset);
+#if defined(AARCH64)
+    // case OPSZ_12b for imm in arm, treat it as 2 bytes e.g. add    %sp $0x0000 lsl $0x00 -> %x0
+    case OPSZ_12b:
+#endif
     case OPSZ_2:
         return vtrace_buf_insert_buf_store_2bytes(drcontext, ilist, where, buf_ptr,
                                                scratch, opnd, offset);
@@ -901,23 +909,7 @@ void insert_trace_for_mem(void *drcontext, instrlist_t *ilist, instr_t *where, o
   }
 
   drvector_t allowed;
-  drreg_init_and_fill_vector(&allowed, true);
-  for (int i = opnd_num_regs_used(mem_opnd) - 1; i >= 0; i--) {
-    reg_id_t reg_used = opnd_get_reg_used(mem_opnd, i);
-    // resize for simd or gpr, mmx regs are not supported!
-    // resize for simd may occur error
-    if(!reg_is_gpr(reg_used)) {
-        continue;
-    }
-    if(reg_is_simd(reg_used) || reg_is_mmx(reg_used)) {
-        drreg_set_vector_entry(&allowed, reg_used, false);
-        continue;
-    }
-    drreg_set_vector_entry(&allowed, reg_resize_to_opsz(reg_used, OPSZ_1), false);
-    drreg_set_vector_entry(&allowed, reg_resize_to_opsz(reg_used, OPSZ_2), false);
-    drreg_set_vector_entry(&allowed, reg_resize_to_opsz(reg_used, OPSZ_4), false);
-    drreg_set_vector_entry(&allowed, reg_resize_to_opsz(reg_used, OPSZ_8), false);
-  }
+  getUnusedRegEntry(&allowed, mem_opnd);
 
   RESERVE_REG(drcontext, ilist, where, &allowed, free_reg);
   drvector_delete(&allowed);
@@ -1203,7 +1195,10 @@ bool instr_is_ignorable(instr_t *ins) {
     int opc = instr_get_opcode(ins);
     switch (opc) {
         case OP_nop:
+#ifdef X86
 	    case OP_nop_modrm:
+#endif
+
 #if defined(AARCH64)
         case OP_ld3:
         case OP_ld3r:
