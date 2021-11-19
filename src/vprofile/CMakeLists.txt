@@ -13,6 +13,7 @@ set(DynamoRIO_USE_LIBC OFF)
 
 set(srcs
   vprofile.cpp
+  common/log.cpp
   vtracer/vtracer.cpp
   )
 set(srcs_static ${srcs})
@@ -46,3 +47,4 @@ install_ext_header(vprofile.h)
 install_ext_header(vprofile_filter_func_list.h)
 install_ext_header(vtracer/vtracer.h)
 install_ext_header(vtracer/vtracer_define.h)
+install_ext_header(common/log.h)

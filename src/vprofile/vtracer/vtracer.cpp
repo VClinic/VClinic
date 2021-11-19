@@ -108,6 +108,9 @@ vtracer_create_trace_buffer_ex(uint buffer_size,
                                vtracer_buf_fill_num_cb_t fill_num_cb,
                                void* user_data_fill_num)
 {
+// #ifdef AARCH64
+//     buffer_size = buffer_size < 4096 ? buffer_size : 4095;
+// #endif
     vtrace_buffer_t *new_client;
     int tls_idx;
     uint tls_offs;
@@ -251,7 +254,10 @@ static void insert_buf_check(void *drcontext, instrlist_t *bb, instr_t *ins, ush
     // buffered checking
     reg_id_t reg_ptr, reg_end;
     // reserve registers if not dead
+#ifndef AARCH64
+    // AArch64 can be aflag-free branched with TBZ instruction
     RESERVE_AFLAGS(drcontext, bb, ins);
+#endif
     RESERVE_REG(drcontext, bb, ins, NULL, reg_ptr);
 #if defined(ARM) || defined(AARCH64)
     // for ARM, we always need two register for the check of bursty sampling.
@@ -266,14 +272,20 @@ static void insert_buf_check(void *drcontext, instrlist_t *bb, instr_t *ins, ush
 #if defined(ARM) || defined(AARCH64)
     #ifdef AARCH64
         minstr_load_wwint_to_reg(drcontext, bb, ins, reg_end, window_enable);
+        MINSERT(bb, ins, XINST_CREATE_sub(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
+        // if reg_ptr > reg_end, the top bit of (reg_ptr-reg_end) will be 0
+        MINSERT(bb, ins, INSTR_CREATE_tbz(drcontext, opnd_create_instr(skip_to_update),
+                                /* If the top bit is still zero, skip the call. */
+                                opnd_create_reg(reg_ptr), OPND_CREATE_INT(63)));
     #else
         minstr_load_wint_to_reg(drcontext, bb, ins, reg_end, window_enable);
-    #endif
         MINSERT(bb, ins, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
+        MINSERT(bb, ins, XINST_CREATE_jump_cond(drcontext, DR_PRED_LE, opnd_create_instr(skip_to_update)));
+    #endif
 #else
         MINSERT(bb, ins, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(window_enable)));
-#endif
         MINSERT(bb, ins, XINST_CREATE_jump_cond(drcontext, DR_PRED_LE, opnd_create_instr(skip_to_update)));
+#endif
         // clear the buffer when not sampled
         for (i = 0; i < clients.entries; ++i) {
             vtrace_buffer_t *buf = (vtrace_buffer_t*)drvector_get_entry(&clients, i);
@@ -299,28 +311,57 @@ static void insert_buf_check(void *drcontext, instrlist_t *bb, instr_t *ins, ush
 #endif
             instr_t* skip_update = INSTR_CREATE_label(drcontext);
             // when there may be overflow, we check and update the trace buffer if possible
-            // the end buffer pointer
-            vtracer_insert_load_buf_end(drcontext, buf, bb, ins, reg_end);
             // current buffer pointer
             vtracer_insert_load_buf_ptr(drcontext, buf, bb, ins, reg_ptr);
+#ifdef AARCH64
+            // for aarch64, larger scratch[i] will result in more instrumentation to track
+            if(scratch[i] >= (1<<12)/*max immediate value for sub is 12-bit integer*/) {
+                MINSERT(bb, ins, INSTR_CREATE_movz(drcontext, opnd_create_reg(reg_end), OPND_CREATE_INT16(scratch[i] & 0xffff), OPND_CREATE_INT8(0)));
+                if(scratch[i] > 0xffff) {
+                    MINSERT(bb, ins, INSTR_CREATE_movk(drcontext, opnd_create_reg(reg_end), OPND_CREATE_INT16((scratch[i] >> 16) & 0xffff), OPND_CREATE_INT8(16)));
+                }
+                MINSERT(bb, ins,
+                    XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
+            } else
+#endif
             // increament the buffer pointer with memRefCnt
             MINSERT(bb, ins,
                     XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr),
                                      OPND_CREATE_INT16(scratch[i])));
+            // the end buffer pointer
+            vtracer_insert_load_buf_end(drcontext, buf, bb, ins, reg_end);
+
             // if buffer will not be full, we will skip the heavy update
             // TODO: use JECXZ (x86)/TBZ (arm) for aflag-free comparison & conditional jump
+#ifdef AARCH64
+            MINSERT(bb, ins, XINST_CREATE_sub(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
+            // if reg_ptr > reg_end, the top bit of (reg_ptr-reg_end) will be 0
+            MINSERT(bb, ins, INSTR_CREATE_tbz(drcontext, opnd_create_instr(skip_update),
+                                 /* If the top bit is still zero, skip the call. */
+                                 opnd_create_reg(reg_ptr), OPND_CREATE_INT(63)));
+#else
             MINSERT(bb, ins, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
             MINSERT(bb, ins, XINST_CREATE_jump_cond(drcontext, DR_PRED_LT, opnd_create_instr(skip_update)));
+#endif
             // get current buffer base
             // reg_ptr = reg_end - buf->buf_size
             MINSERT(bb, ins, XINST_CREATE_move(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
+#ifdef AARCH64
+            // for aarch64, larger buffer size will result in more instrumentation to track
+            if(buf->buf_size >= (1<<12)/*max immediate value for sub is 12-bit integer*/) {
+                MINSERT(bb, ins, INSTR_CREATE_movz(drcontext, opnd_create_reg(reg_end), OPND_CREATE_INT16(buf->buf_size & 0xffff), OPND_CREATE_INT8(0)));
+                if(buf->buf_size > 0xffff) {
+                    MINSERT(bb, ins, INSTR_CREATE_movk(drcontext, opnd_create_reg(reg_end), OPND_CREATE_INT16((buf->buf_size >> 16) & 0xffff), OPND_CREATE_INT8(16)));
+                }
+                MINSERT(bb, ins, XINST_CREATE_sub(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
+            } else
+#endif
             MINSERT(bb, ins, XINST_CREATE_sub(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(buf->buf_size)));
+
             // get current buffer end
             vtracer_insert_load_buf_ptr(drcontext, buf, bb, ins, reg_end);
             // insert cleancall for updating the buffered trace
             dr_insert_clean_call(drcontext, bb, ins, (void*)buf->full_cb, false, 3, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end), OPND_CREATE_INTPTR(buf->user_data_full));
-            // clear the buffer
-            //vtracer_insert_clear_buf(drcontext, buf, bb, ins, reg_ptr/*scratch*/);
             // fast clear the buffer with the restored buf base in reg_ptr
             dr_insert_write_raw_tls(drcontext, bb, ins, buf->tls_seg, buf->tls_offs,
                             reg_ptr);
@@ -337,7 +378,9 @@ static void insert_buf_check(void *drcontext, instrlist_t *bb, instr_t *ins, ush
     MINSERT(bb, ins, skip_to_end);
 #endif
     UNRESERVE_REG(drcontext, bb, ins, reg_ptr);
+#ifndef AARCH64
     UNRESERVE_AFLAGS(drcontext, bb, ins);
+#endif
 }
 
 static dr_emit_flags_t
@@ -386,6 +429,7 @@ event_basic_block(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, b
     }
     // if sampling enabled, we need to insert instruction counts
     if (enable_sampling) {
+        // TODO: inline these simple cleancalls for lower overhead
         if(enable_check) {
             dr_insert_clean_call(drcontext, bb, insert_pt, (void *)bb_update_and_check, false, 1, OPND_CREATE_INT32(num_instructions));
         } else {
@@ -701,6 +745,7 @@ vtrace_buf_insert_buf_store_ptrsz(void *drcontext, instrlist_t *ilist,
                                instr_t *where, reg_id_t buf_ptr, reg_id_t scratch,
                                opnd_t opnd, short offset)
 {
+    VTRACER_LOG(SUMMARY, "enter vtrace_buf_insert_buf_store_ptrsz\n");
     if (!opnd_is_reg(opnd) && !opnd_is_immed(opnd))
         return false;
     if (opnd_is_immed(opnd)) {
@@ -732,6 +777,7 @@ vtrace_buf_insert_buf_store_ptrsz(void *drcontext, instrlist_t *ilist,
         INSTR_XL8(instr, instr_get_app_pc(where));
         MINSERT(ilist, where, instr);
     }
+    VTRACER_LOG(SUMMARY, "exit vtrace_buf_insert_buf_store_ptrsz\n");
     return true;
 }
 
@@ -741,14 +787,20 @@ vtrace_buf_insert_buf_store(void *drcontext, instrlist_t *ilist,
                          instr_t *where, reg_id_t buf_ptr, reg_id_t scratch, opnd_t opnd,
                          opnd_size_t opsz, short offset)
 {
+    VTRACER_LOG(SUMMARY, "enter vtrace_buf_insert_buf_store\n");
     switch (opsz) {
 #if defined(AARCH64)
     // case OPSZ_2b for optional shift(lsl lsr...) in arm, treat it as 1 bytes e.g. add    %sp $0x0000 **lsl** $0x00 -> %x0
     case OPSZ_2b:
+    // case OPSZ_3b for SUBS (extended register) imm3 in arm, treat it as 1 bytes e.g. subs   %x1 %x2 lsl **$0x00** -> %xzr
+    case OPSZ_3b:
+    // case OPSZ_4b for CSEL cond in arm, treat it as 1 bytes e.g. csel   %x1 %x22 **ne** -> %x22
+    case OPSZ_4b:
     // case OPSZ_5b for shift(lsl lsr...) amount in arm, treat it as 1 bytes e.g. add    %sp $0x0000 lsl **$0x00** -> %x0
     case OPSZ_5b:
+    // case OPSZ_6b for SUBS (shifted register) imm6 in arm, treat it as 1 bytes e.g. subs   %x1 %x2 lsl **$0x00** -> %xzr
+    case OPSZ_6b:
 #endif
-        // what is OPSZ_2b?
     case OPSZ_1:
         return vtrace_buf_insert_buf_store_1byte(drcontext, ilist, where, buf_ptr,
                                               scratch, opnd, offset);
@@ -769,6 +821,7 @@ vtrace_buf_insert_buf_store(void *drcontext, instrlist_t *ilist,
                                               scratch, opnd, offset);
     default: assert(false); return false;
     }
+    VTRACER_LOG(SUMMARY, "exit vtrace_buf_insert_buf_store\n");
 }
 
 #ifdef VTRACER_DEBUG
@@ -781,6 +834,7 @@ void debug_print(void* src, int offset) {
 void insert_load(void *drcontext, instrlist_t *ilist, instr_t *where, reg_id_t dst,
             reg_id_t src, int offset, opnd_size_t opsz)
 {
+    VTRACER_LOG(SUMMARY, "enter insert_load\n");
 #ifdef VTRACER_DEBUG_DETAIL
     dr_insert_clean_call(drcontext, ilist, where, (void*)debug_print, false, 2, opnd_create_reg(src), OPND_CREATE_INT32(offset));
 #endif
@@ -808,12 +862,14 @@ void insert_load(void *drcontext, instrlist_t *ilist, instr_t *where, reg_id_t d
         break;
     default: DR_ASSERT(false); break;
     }
+    VTRACER_LOG(SUMMARY, "exit insert_load\n");
 }
 
 template <int size>
 inline __attribute__((always_inline)) void
 insert_trace_value_in_mem(void *drcontext, instrlist_t *ilist, instr_t *where,
                           ushort offset, reg_id_t reg_addr, reg_id_t reg_ptr) {
+  VTRACER_LOG(SUMMARY, "enter insert_trace_value_in_mem: size=%d\n", size);
   switch (size) {
   case 1: {
     reg_id_t reg_val = reg_resize_to_opsz(reg_addr, OPSZ_1);
@@ -889,12 +945,14 @@ insert_trace_value_in_mem(void *drcontext, instrlist_t *ilist, instr_t *where,
     break;
   }
   }
+  VTRACER_LOG(SUMMARY, "exit insert_trace_value_in_mem: size=%d\n", size);
 }
 
 /* Trace Memory Operands */
 template <int sz>
 void insert_trace_for_mem(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t mem_opnd, ushort offset, 
                           reg_id_t reg_ptr, reg_id_t scratch) {
+  VTRACER_LOG(SUMMARY, "enter insert_trace_for_mem: size=%d\n", sz);
   reg_id_t free_reg;
   
   // check if reg is dirty
@@ -923,12 +981,13 @@ void insert_trace_for_mem(void *drcontext, instrlist_t *ilist, instr_t *where, o
   insert_trace_value_in_mem<sz>(drcontext, ilist, where, offset, 
                                 free_reg /*addr*/, reg_ptr /*ptr*/);
   UNRESERVE_REG(drcontext, ilist, where, free_reg);
+  VTRACER_LOG(SUMMARY, "exit insert_trace_for_mem: size=%d\n", sz);
 }
 
 /* Trace Imm Operands */
 void insert_trace_for_imm(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t imm_opnd, ushort offset, 
                           opnd_size_t opsz, reg_id_t reg_ptr, reg_id_t scratch) {
-  vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr, DR_REG_NULL,
+  vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr, scratch,
                              imm_opnd, opsz,
                              offset);
 }
@@ -946,6 +1005,7 @@ void insert_trace_value_in_reg(void *drcontext, instrlist_t *ilist,
 template <int size>
 void insert_trace_value_in_simd(void *drcontext, instrlist_t *ilist, instr_t *where, 
                                 size_t offset, reg_id_t reg_simd, reg_id_t reg_ptr) {
+  VTRACER_LOG(SUMMARY, "enter insert_trace_value_in_simd: size=%d\n", size);
   // store the value of the simd register into the buffered trace
 #ifdef X86
     switch(size) {
@@ -1011,21 +1071,75 @@ void insert_trace_value_in_simd(void *drcontext, instrlist_t *ilist, instr_t *wh
     DR_ASSERT_MSG(0,
                 "insert_trace_value_in_simd not implemented!");
 #elif defined(AARCH64)
-    DR_ASSERT_MSG(0,
-                "insert_trace_value_in_simd not implemented!");
+    int i = 0;
+    switch(size) {
+	    case 1:
+          MINSERT(ilist, where,
+                  XINST_CREATE_store_simd(drcontext,
+                                          opnd_create_base_disp_aarch64(reg_ptr,
+                                                                DR_REG_NULL, (dr_extend_type_t) i,
+                                                                false, offset, (dr_opnd_flags_t) i, OPSZ_1),
+                                          opnd_create_reg(reg_simd)));
+          break;
+        case 2:
+          MINSERT(ilist, where,
+                  XINST_CREATE_store_simd(drcontext,
+                                          opnd_create_base_disp_aarch64(reg_ptr,
+                                                                DR_REG_NULL, (dr_extend_type_t) i,
+                                                                false, offset, (dr_opnd_flags_t) i, OPSZ_2),
+                                          opnd_create_reg(reg_simd)));
+          break;
+        case 4:
+          MINSERT(ilist, where,
+                  XINST_CREATE_store_simd(drcontext,
+                                          opnd_create_base_disp_aarch64(reg_ptr,
+                                                                DR_REG_NULL, (dr_extend_type_t) i,
+                                                                false, offset, (dr_opnd_flags_t) i, OPSZ_4),
+                                          opnd_create_reg(reg_simd)));
+          break;
+        case 8:
+            MINSERT(ilist, where,
+                  INSTR_CREATE_st1_multi_1(drcontext,
+                                          opnd_create_base_disp_aarch64(reg_ptr,
+                                                                DR_REG_NULL, (dr_extend_type_t) i,
+                                                                false, offset, (dr_opnd_flags_t) i, OPSZ_8),
+                                          opnd_create_reg(reg_simd), OPND_CREATE_BYTE()));
+            break;
+        case 16:
+            MINSERT(ilist, where,
+                  INSTR_CREATE_st1_multi_1(drcontext,
+                                          opnd_create_base_disp_aarch64(reg_ptr,
+                                                                DR_REG_NULL, (dr_extend_type_t) i,
+                                                                false, offset, (dr_opnd_flags_t) i, OPSZ_16),
+                                          opnd_create_reg(reg_simd), OPND_CREATE_BYTE()));
+            break;
+        case 32:
+            MINSERT(ilist, where,
+                  INSTR_CREATE_st1_multi_1(drcontext,
+                                          opnd_create_base_disp_aarch64(reg_ptr,
+                                                                DR_REG_NULL, (dr_extend_type_t) i,
+                                                                false, offset, (dr_opnd_flags_t) i, OPSZ_32),
+                                          opnd_create_reg(reg_simd), OPND_CREATE_BYTE()));
+            break;
+        default:
+            DR_ASSERT_MSG(0,
+                        "insert_trace_value_in_simd: Unknown simd size!");
+    }
 #endif
+    VTRACER_LOG(SUMMARY, "exit insert_trace_value_in_simd: size=%d\n", size);
 }
 
 template <int sz>
 /* Trace General Purpose Register Operands */
 void insert_trace_for_gpr(void *drcontext, instrlist_t *ilist, instr_t *where,
                           opnd_t gpr_opnd, ushort offset, reg_id_t reg_ptr, reg_id_t scratch) {
+  VTRACER_LOG(SUMMARY, "enter insert_trace_for_gpr: sz=%d\n", sz);
   DR_ASSERT_MSG(opnd_is_reg(gpr_opnd),
                 "insert_trace_for_gpr should only used for GPR operand!");
   // if there are register used in this operand, we directly use this operand
   reg_id_t reg_used;
   reg_used = opnd_get_reg_used(gpr_opnd, 0);
-  DR_ASSERT_MSG(reg_is_gpr(reg_used),
+  DR_ASSERT_MSG(reg_is_gpr(reg_used) || reg_used == DR_REG_XZR || reg_used == DR_REG_WZR,
                 "insert_trace_for_gpr should only used for GPR operand!");
   // get the operand size to resize the scratch registers
   opnd_size_t opsz = opnd_get_size(gpr_opnd);
@@ -1051,17 +1165,20 @@ void insert_trace_for_gpr(void *drcontext, instrlist_t *ilist, instr_t *where,
   // trace
   insert_trace_value_in_reg(drcontext, ilist, where, opsz, offset, scratch,
                                 reg_ptr);
+  VTRACER_LOG(SUMMARY, "exit insert_trace_for_gpr: sz=%d\n", sz);
 }
 
 /* Trace SIMD Register Operands */
 template <int sz>
 void insert_trace_for_simd(void *drcontext, instrlist_t *ilist, instr_t *where,
                            opnd_t simd_opnd, ushort offset, reg_id_t reg_ptr) {
+  VTRACER_LOG(SUMMARY, "enter insert_trace_for_simd: sz=%d\n", sz);
   // directly store the value in the target SIMD register into the cache
   // Note that the reg_ptr has already been loaded as the buffer pointer, so
   // no need to load again
   reg_id_t reg_simd = opnd_get_reg_used(simd_opnd, 0);
   insert_trace_value_in_simd<sz>(drcontext, ilist, where, offset, reg_simd, reg_ptr);
+  VTRACER_LOG(SUMMARY, "exit insert_trace_for_simd: sz=%d\n", sz);
 }
 
 /* TODO: Trace X87 Operands (X86/64 only) */
@@ -1070,7 +1187,7 @@ void insert_trace_for_x87(void *drcontext, instrlist_t *ilist, instr_t *where,
 #ifdef DEBUG_X87
   DR_ASSERT_MSG(false, "Not Implemented for x87 tracing!");
 #else
-  dr_fprintf(STDERR, "Warning: Trivial tracing & detection for X87 instructions are ignored!\n");
+  VTRACER_LOG(SUMMARY, "Warning: Trivial tracing & detection for X87 instructions are ignored!\n");
 #endif
 }
 
@@ -1078,6 +1195,18 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
                               instrlist_t *ilist, opnd_t ref, reg_id_t reg_ptr,
                               reg_id_t scratch, ushort offset)
 {
+    VTRACER_LOG(SUMMARY, "enter vtracer_insert_trace_val\n");
+#ifdef AARCH64
+    // BUG in dynamorio: the size query of DR_REG_CNTCVT_EL0 will fail as it has not implemented.
+    // Hotfix: early query the type of opnd and register to filter out this buggy case
+    if(opnd_is_reg(ref)) {
+        reg_id_t reg = opnd_get_reg(ref);
+        if(reg == DR_REG_CNTVCT_EL0 || (reg >= DR_REG_NZCV && reg <= DR_REG_FPSR)) {
+            VTRACER_LOG(SUMMARY, "exit vtracer_insert_trace_val: not implemented control regiter!\n");
+            return;
+        }
+    }
+#endif
     int size = opnd_size_in_bytes(opnd_get_size(ref));
     if(opnd_is_memory_reference(ref)) {
         switch(size) {
@@ -1104,7 +1233,13 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
         }
     } else if(opnd_is_reg(ref)) {
         reg_id_t reg = opnd_get_reg(ref);
-        if(reg_is_gpr(reg)) {
+#ifdef AARCH64
+        if(reg == DR_REG_TPIDRURW || reg == DR_REG_TPIDRURO) {
+            VTRACER_LOG(SUMMARY, "exit vtracer_insert_trace_val: reg==DR_REG_TPIDRURW || reg==DR_REG_TPIDRURO\n");
+            return;
+        }
+#endif
+        if(reg_is_gpr(reg) || reg == DR_REG_XZR || reg == DR_REG_WZR) {
             switch(size) {
                 case 1:
                     insert_trace_for_gpr<1>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
@@ -1146,10 +1281,14 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
                 default:
                     assert(false && "Unknown SIMD operand size!");
             }
-        } else if(reg_is_fp(reg)) {
+        } 
+#if !defined(ARM) && !defined(AARCH64)        
+        else if(reg_is_fp(reg)) {
             // TODO: Not implemented (as the modern compilers will avoid using heavy x87 instructions)
             insert_trace_for_x87(drcontext, ilist, where, ref, reg_ptr);
-        } else {
+        } 
+#endif        
+        else {
             dr_fprintf(STDERR, "For REG %s\n", get_register_name(reg)); fflush(stdout);
             assert(false && "Unknown register type!");
         }
@@ -1158,10 +1297,12 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
         insert_trace_for_imm(drcontext, ilist, where, ref, offset, opnd_get_size(ref), reg_ptr, scratch);
     } else if(opnd_is_pc(ref)) {
         // TODO: Not implemented
+        VTRACER_LOG(SUMMARY, "exit vtracer_insert_trace_val: opnd_is_pc not implemented\n");
         return;
     } else {
         assert(false && "Unknown operand type!\n");
     }
+    VTRACER_LOG(SUMMARY, "exit vtracer_insert_trace_val: successfully\n");
 }
 
 template <typename T>
@@ -1169,6 +1310,7 @@ void vtracer_insert_trace_constant(void *drcontext, instr_t *where,
                                    instrlist_t *ilist, T val, reg_id_t reg_ptr,
                                    reg_id_t scratch, ushort offset)
 {
+    VTRACER_LOG(SUMMARY, "enter vtracer_insert_trace_constant\n");
     switch (sizeof(T)) {
         case 1:
             vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr, DR_REG_NULL,
@@ -1189,6 +1331,7 @@ void vtracer_insert_trace_constant(void *drcontext, instr_t *where,
         default:
             assert(false && "Unknown constant size!\n");
     }
+    VTRACER_LOG(SUMMARY, "exit vtracer_insert_trace_constant\n");
 }
 
 bool instr_is_ignorable(instr_t *ins) {

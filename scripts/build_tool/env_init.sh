@@ -46,3 +46,7 @@ do
     rm -rf $DYNAMORIO_CLIENT_PATH/$CLIENT
     ln -s $DRCCTLIB_CLIENTS_ROOT_PATH/$CLIENT $DYNAMORIO_CLIENT_PATH/$CLIENT
 done
+
+cd $CUR_DIR/temp_solution
+./aarch64-fix.sh
+cd $CUR_DIR

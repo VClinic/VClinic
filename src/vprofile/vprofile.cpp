@@ -223,7 +223,7 @@ vtrace_buffer_t* get_trace_buf(vtrace_t *trace, bool is_float, int esize, int si
 }
 
 template<int size>
-inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontext, instrlist_t *bb, instr_t *instr, int32_t slot, opnd_t opnd, vtrace_t *trace)
+inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontext, instrlist_t *bb, instr_t *instr, int32_t slot, opnd_t opnd, vtrace_t *trace, reg_id_t reg_addr, reg_id_t reg_ptr, reg_id_t scratch)
 {
     bool is_float = instr_is_floating(instr);
     int esize = (is_float) ? FloatOperandSizeTable(instr, opnd) : IntegerOperandSizeTable(instr, opnd);
@@ -234,16 +234,6 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
     }
 #endif
     // int size = opnd_size_in_bytes(opnd_get_size(opnd));
-    reg_id_t reg_addr, reg_ptr;
-    reg_id_t scratch;
-    drvector_t allowed;
-    getUnusedRegEntry(&allowed, opnd);
-
-    RESERVE_REG(drcontext, bb, instr, &allowed, scratch);
-    RESERVE_REG(drcontext, bb, instr, &allowed, reg_addr);
-    RESERVE_REG(drcontext, bb, instr, &allowed, reg_ptr);
-    drvector_delete(&allowed);
-
     if(trace->strictly_ordered) {
         if((*(bool (*)(opnd_t))trace->buff->user_data_fill_num)(opnd)) {
             // use size&&esize&&is_float and then insert trace val
@@ -374,9 +364,6 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
 #ifdef VPROFILE_DEBUG
             debug_unknown_case(drcontext, instr, opnd);
 #endif
-            UNRESERVE_REG(drcontext, bb, instr, scratch);
-            UNRESERVE_REG(drcontext, bb, instr, reg_addr);
-            UNRESERVE_REG(drcontext, bb, instr, reg_ptr);
             return;
         }
         if((*(bool (*)(opnd_t))buf->user_data_fill_num)(opnd)) {
@@ -479,9 +466,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             }
         }
     }
-    UNRESERVE_REG(drcontext, bb, instr, scratch);
-    UNRESERVE_REG(drcontext, bb, instr, reg_addr);
-    UNRESERVE_REG(drcontext, bb, instr, reg_ptr);
+    return ;
 }
 
 void
@@ -505,11 +490,33 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
     
     if(global_client_cb.ins_instrument_cb)
         (*global_client_cb.ins_instrument_cb)(drcontext, instr, bb);
+
+    // try to quick return when there is no opnd valid
+    bool is_valid = false;
+    int num = instr_num_srcs(instr);
+    for(int j = 0; j < num; j++) {
+        opnd_t opnd = instr_get_src(instr, j);
+        int size = opnd_size_in_bytes(opnd_get_size(opnd));
+        if(size != 0) {
+            is_valid = true;
+            break;
+        }
+    }
+    // quick return as there is no opnd valid
+    if(!is_valid) return;
     
+    reg_id_t reg_addr, reg_ptr;
+    reg_id_t scratch;
+    drvector_t allowed;
+    getUnusedRegEntryInstr(&allowed, instr);
+
+    RESERVE_REG(drcontext, bb, instr, &allowed, scratch);
+    RESERVE_REG(drcontext, bb, instr, &allowed, reg_addr);
+    RESERVE_REG(drcontext, bb, instr, &allowed, reg_ptr);
+    drvector_delete(&allowed);
     // for each trace registered by user, we need to call func in vtrace to trace value.
     for (i = 0; i < vtrace_t_list.entries; ++i) {
         vtrace_t *trace = (vtrace_t*)drvector_get_entry(&vtrace_t_list, i);
-        int num = instr_num_srcs(instr);
         for(int j = 0; j < num; j++) {
             opnd_t opnd = instr_get_src(instr, j);
             int size = opnd_size_in_bytes(opnd_get_size(opnd));
@@ -517,16 +524,16 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
                 continue;
             }
             switch(size) {
-                case 1: insertStoreTraceBuffer<1>(drcontext, bb, instr, slot, opnd, trace);break;
-                case 2: insertStoreTraceBuffer<2>(drcontext, bb, instr, slot, opnd, trace);break;
-                case 4: insertStoreTraceBuffer<4>(drcontext, bb, instr, slot, opnd, trace);break;
-                case 8: insertStoreTraceBuffer<8>(drcontext, bb, instr, slot, opnd, trace);break;
-                case 16: insertStoreTraceBuffer<16>(drcontext, bb, instr, slot, opnd, trace);break;
-                case 32: insertStoreTraceBuffer<32>(drcontext, bb, instr, slot, opnd, trace);break;
-                case 64: insertStoreTraceBuffer<64>(drcontext, bb, instr, slot, opnd, trace);break;
-                case 128: insertStoreTraceBuffer<128>(drcontext, bb, instr, slot, opnd, trace);break;
-                case 256: insertStoreTraceBuffer<256>(drcontext, bb, instr, slot, opnd, trace);break;
-                case 512: insertStoreTraceBuffer<512>(drcontext, bb, instr, slot, opnd, trace);break;
+                case 1: insertStoreTraceBuffer<1>(drcontext, bb, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                case 2: insertStoreTraceBuffer<2>(drcontext, bb, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                case 4: insertStoreTraceBuffer<4>(drcontext, bb, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                case 8: insertStoreTraceBuffer<8>(drcontext, bb, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                case 16: insertStoreTraceBuffer<16>(drcontext, bb, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                case 32: insertStoreTraceBuffer<32>(drcontext, bb, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                case 64: insertStoreTraceBuffer<64>(drcontext, bb, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                case 128: insertStoreTraceBuffer<128>(drcontext, bb, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                case 256: insertStoreTraceBuffer<256>(drcontext, bb, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                case 512: insertStoreTraceBuffer<512>(drcontext, bb, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch);break;
                 default: {
                     // DR_ASSERT_MSG(false, "InstrumentInsCallback Unknown size!");
 #ifdef VPROFILE_DEBUG
@@ -544,16 +551,16 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
                         continue;
                     }
                     switch(reg_size) {
-                        case 1: insertStoreTraceBuffer<1>(drcontext, bb, instr, slot, reg_used, trace);break;
-                        case 2: insertStoreTraceBuffer<2>(drcontext, bb, instr, slot, reg_used, trace);break;
-                        case 4: insertStoreTraceBuffer<4>(drcontext, bb, instr, slot, reg_used, trace);break;
-                        case 8: insertStoreTraceBuffer<8>(drcontext, bb, instr, slot, reg_used, trace);break;
-                        case 16: insertStoreTraceBuffer<16>(drcontext, bb, instr, slot, reg_used, trace);break;
-                        case 32: insertStoreTraceBuffer<32>(drcontext, bb, instr, slot, reg_used, trace);break;
-                        case 64: insertStoreTraceBuffer<64>(drcontext, bb, instr, slot, reg_used, trace);break;
-                        case 128: insertStoreTraceBuffer<128>(drcontext, bb, instr, slot, reg_used, trace);break;
-                        case 256: insertStoreTraceBuffer<256>(drcontext, bb, instr, slot, reg_used, trace);break;
-                        case 512: insertStoreTraceBuffer<512>(drcontext, bb, instr, slot, reg_used, trace);break;
+                        case 1: insertStoreTraceBuffer<1>(drcontext, bb, instr, slot, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                        case 2: insertStoreTraceBuffer<2>(drcontext, bb, instr, slot, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                        case 4: insertStoreTraceBuffer<4>(drcontext, bb, instr, slot, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                        case 8: insertStoreTraceBuffer<8>(drcontext, bb, instr, slot, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                        case 16: insertStoreTraceBuffer<16>(drcontext, bb, instr, slot, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                        case 32: insertStoreTraceBuffer<32>(drcontext, bb, instr, slot, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                        case 64: insertStoreTraceBuffer<64>(drcontext, bb, instr, slot, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                        case 128: insertStoreTraceBuffer<128>(drcontext, bb, instr, slot, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                        case 256: insertStoreTraceBuffer<256>(drcontext, bb, instr, slot, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                        case 512: insertStoreTraceBuffer<512>(drcontext, bb, instr, slot, reg_used, trace, reg_addr, reg_ptr, scratch);break;
                         default: {
                             // DR_ASSERT_MSG(false, "InstrumentInsCallback Unknown size!");
 #ifdef VPROFILE_DEBUG
@@ -566,10 +573,13 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
             } 
         }
     }
+    UNRESERVE_REG(drcontext, bb, instr, scratch);
+    UNRESERVE_REG(drcontext, bb, instr, reg_addr);
+    UNRESERVE_REG(drcontext, bb, instr, reg_ptr);
 }
 
 template<int size>
-inline __attribute__((always_inline)) void insertStoreTraceBufferDefault(void *drcontext, instrlist_t *bb, instr_t *instr, opnd_t opnd, vtrace_t *trace)
+inline __attribute__((always_inline)) void insertStoreTraceBufferDefault(void *drcontext, instrlist_t *bb, instr_t *instr, opnd_t opnd, vtrace_t *trace, reg_id_t reg_addr, reg_id_t reg_ptr, reg_id_t scratch)
 {
     bool is_float = instr_is_floating(instr);
     int esize = (is_float) ? FloatOperandSizeTable(instr, opnd) : IntegerOperandSizeTable(instr, opnd);
@@ -580,16 +590,6 @@ inline __attribute__((always_inline)) void insertStoreTraceBufferDefault(void *d
     }
 #endif
     // int size = opnd_size_in_bytes(opnd_get_size(opnd));
-    reg_id_t reg_addr, reg_ptr;
-    reg_id_t scratch;
-    drvector_t allowed;
-    getUnusedRegEntry(&allowed, opnd);
-
-    RESERVE_REG(drcontext, bb, instr, &allowed, scratch);
-    RESERVE_REG(drcontext, bb, instr, &allowed, reg_addr);
-    RESERVE_REG(drcontext, bb, instr, &allowed, reg_ptr);
-    drvector_delete(&allowed);
-
     if(trace->strictly_ordered) {
         if((*(bool (*)(opnd_t))trace->buff->user_data_fill_num)(opnd)) {
             // use size&&esize&&is_float and then insert trace val
@@ -641,9 +641,6 @@ inline __attribute__((always_inline)) void insertStoreTraceBufferDefault(void *d
 #ifdef VPROFILE_DEBUG
             debug_unknown_case(drcontext, instr, opnd);
 #endif
-            UNRESERVE_REG(drcontext, bb, instr, scratch);
-            UNRESERVE_REG(drcontext, bb, instr, reg_addr);
-            UNRESERVE_REG(drcontext, bb, instr, reg_ptr);
             return;
         }
         if((*(bool (*)(opnd_t))buf->user_data_fill_num)(opnd)) {
@@ -679,9 +676,6 @@ inline __attribute__((always_inline)) void insertStoreTraceBufferDefault(void *d
             }
         }
     }
-    UNRESERVE_REG(drcontext, bb, instr, scratch);
-    UNRESERVE_REG(drcontext, bb, instr, reg_addr);
-    UNRESERVE_REG(drcontext, bb, instr, reg_ptr);
 }
 
 static dr_emit_flags_t
@@ -698,10 +692,33 @@ event_basic_block_default(void *drcontext, void *tag, instrlist_t *bb, bool for_
             if(global_client_cb.ins_instrument_cb) {
                 (*global_client_cb.ins_instrument_cb)(drcontext, instr, bb);
             }
+
+            // try to quick return when there is no opnd valid
+            bool is_valid = false;
+            int num = instr_num_srcs(instr);
+            for(int j = 0; j < num; j++) {
+                opnd_t opnd = instr_get_src(instr, j);
+                int size = opnd_size_in_bytes(opnd_get_size(opnd));
+                if(size != 0) {
+                    is_valid = true;
+                    break;
+                }
+            }
+            // quick return as there is no opnd valid
+            if(!is_valid) continue;
+
+            reg_id_t reg_addr, reg_ptr;
+            reg_id_t scratch;
+            drvector_t allowed;
+            getUnusedRegEntryInstr(&allowed, instr);
+
+            RESERVE_REG(drcontext, bb, instr, &allowed, scratch);
+            RESERVE_REG(drcontext, bb, instr, &allowed, reg_addr);
+            RESERVE_REG(drcontext, bb, instr, &allowed, reg_ptr);
+            drvector_delete(&allowed);
             unsigned int i;
             for (i = 0; i < vtrace_t_list.entries; ++i) {
                 vtrace_t *trace = (vtrace_t*)drvector_get_entry(&vtrace_t_list, i);
-                int num = instr_num_srcs(instr);
                 for(int j = 0; j < num; j++) {
                     opnd_t opnd = instr_get_src(instr, j);
                     int size = opnd_size_in_bytes(opnd_get_size(opnd));
@@ -709,16 +726,16 @@ event_basic_block_default(void *drcontext, void *tag, instrlist_t *bb, bool for_
                         continue;
                     }
                     switch(size) {
-                        case 1: insertStoreTraceBufferDefault<1>(drcontext, bb, instr, opnd, trace);break;
-                        case 2: insertStoreTraceBufferDefault<2>(drcontext, bb, instr, opnd, trace);break;
-                        case 4: insertStoreTraceBufferDefault<4>(drcontext, bb, instr, opnd, trace);break;
-                        case 8: insertStoreTraceBufferDefault<8>(drcontext, bb, instr, opnd, trace);break;
-                        case 16: insertStoreTraceBufferDefault<16>(drcontext, bb, instr, opnd, trace);break;
-                        case 32: insertStoreTraceBufferDefault<32>(drcontext, bb, instr, opnd, trace);break;
-                        case 64: insertStoreTraceBufferDefault<64>(drcontext, bb, instr, opnd, trace);break;
-                        case 128: insertStoreTraceBufferDefault<128>(drcontext, bb, instr, opnd, trace);break;
-                        case 256: insertStoreTraceBufferDefault<256>(drcontext, bb, instr, opnd, trace);break;
-                        case 512: insertStoreTraceBufferDefault<512>(drcontext, bb, instr, opnd, trace);break;
+                        case 1: insertStoreTraceBufferDefault<1>(drcontext, bb, instr, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                        case 2: insertStoreTraceBufferDefault<2>(drcontext, bb, instr, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                        case 4: insertStoreTraceBufferDefault<4>(drcontext, bb, instr, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                        case 8: insertStoreTraceBufferDefault<8>(drcontext, bb, instr, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                        case 16: insertStoreTraceBufferDefault<16>(drcontext, bb, instr, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                        case 32: insertStoreTraceBufferDefault<32>(drcontext, bb, instr, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                        case 64: insertStoreTraceBufferDefault<64>(drcontext, bb, instr, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                        case 128: insertStoreTraceBufferDefault<128>(drcontext, bb, instr, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                        case 256: insertStoreTraceBufferDefault<256>(drcontext, bb, instr, opnd, trace, reg_addr, reg_ptr, scratch);break;
+                        case 512: insertStoreTraceBufferDefault<512>(drcontext, bb, instr, opnd, trace, reg_addr, reg_ptr, scratch);break;
                         default: {
                             // DR_ASSERT_MSG(false, "InstrumentInsCallback Unknown size!");
 #ifdef VPROFILE_DEBUG
@@ -736,16 +753,16 @@ event_basic_block_default(void *drcontext, void *tag, instrlist_t *bb, bool for_
                                 continue;
                             }
                             switch(reg_size) {
-                                case 1: insertStoreTraceBufferDefault<1>(drcontext, bb, instr, reg_used, trace);break;
-                                case 2: insertStoreTraceBufferDefault<2>(drcontext, bb, instr, reg_used, trace);break;
-                                case 4: insertStoreTraceBufferDefault<4>(drcontext, bb, instr, reg_used, trace);break;
-                                case 8: insertStoreTraceBufferDefault<8>(drcontext, bb, instr, reg_used, trace);break;
-                                case 16: insertStoreTraceBufferDefault<16>(drcontext, bb, instr, reg_used, trace);break;
-                                case 32: insertStoreTraceBufferDefault<32>(drcontext, bb, instr, reg_used, trace);break;
-                                case 64: insertStoreTraceBufferDefault<64>(drcontext, bb, instr, reg_used, trace);break;
-                                case 128: insertStoreTraceBufferDefault<128>(drcontext, bb, instr, reg_used, trace);break;
-                                case 256: insertStoreTraceBufferDefault<256>(drcontext, bb, instr, reg_used, trace);break;
-                                case 512: insertStoreTraceBufferDefault<512>(drcontext, bb, instr, reg_used, trace);break;
+                                case 1: insertStoreTraceBufferDefault<1>(drcontext, bb, instr, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                                case 2: insertStoreTraceBufferDefault<2>(drcontext, bb, instr, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                                case 4: insertStoreTraceBufferDefault<4>(drcontext, bb, instr, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                                case 8: insertStoreTraceBufferDefault<8>(drcontext, bb, instr, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                                case 16: insertStoreTraceBufferDefault<16>(drcontext, bb, instr, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                                case 32: insertStoreTraceBufferDefault<32>(drcontext, bb, instr, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                                case 64: insertStoreTraceBufferDefault<64>(drcontext, bb, instr, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                                case 128: insertStoreTraceBufferDefault<128>(drcontext, bb, instr, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                                case 256: insertStoreTraceBufferDefault<256>(drcontext, bb, instr, reg_used, trace, reg_addr, reg_ptr, scratch);break;
+                                case 512: insertStoreTraceBufferDefault<512>(drcontext, bb, instr, reg_used, trace, reg_addr, reg_ptr, scratch);break;
                                 default: {
                                     // DR_ASSERT_MSG(false, "InstrumentInsCallback Unknown size!");
 #ifdef VPROFILE_DEBUG
@@ -758,6 +775,9 @@ event_basic_block_default(void *drcontext, void *tag, instrlist_t *bb, bool for_
                     }  
                 }
             }
+            UNRESERVE_REG(drcontext, bb, instr, scratch);
+            UNRESERVE_REG(drcontext, bb, instr, reg_addr);
+            UNRESERVE_REG(drcontext, bb, instr, reg_ptr);
         }
     }
     
@@ -785,6 +805,7 @@ bool vprofile_init(bool (*filter)(instr_t *),
                    uint8_t flag)
 {
 #ifdef VPROFILE_DEBUG
+    LOG_INIT(EVERYTHING);
     pid_t pid = getpid();
 #ifdef ARM_CCTLIB
     char name[MAXIMUM_PATH] = "arm-";
@@ -832,6 +853,7 @@ bool vprofile_init(bool (*filter)(instr_t *),
 void vprofile_exit()
 {
 #ifdef VPROFILE_DEBUG
+    LOG_FINI();
     dr_close_file(gDebug);
 #endif
     if(global_flags != VPROFILE_DEFAULT)

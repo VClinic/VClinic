@@ -1,2 +1,5 @@
 .VSCodeCounter
 .vscode/settings.json
+build_debug
+build
+logs

@@ -8,7 +8,7 @@
 #include "vtracer/vtracer_define.h"
 #include "vprofile_filter_func_list.h"
 /* High-level Interfaces for VProfile Framework */
-
+#define VPROFILE_LOG(level, format, args...) LOG("<vprofile>", level, format, ##args)
 /* vprofile modes */
 enum {
   VPROFILE_DEFAULT = 0x00,

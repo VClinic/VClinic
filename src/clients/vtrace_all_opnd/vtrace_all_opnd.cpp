@@ -28,10 +28,14 @@ struct cache_t {
     int8_t val[size];
 };
 
+#ifdef AARCH64
+#define MEM_BUF_SIZE(size) 4095
+#else
 /* Max number of mem_ref a buffer can have. */
 #define MAX_NUM_MEM_REFS 4096
 /* The maximum size of buffer for holding mem_refs. */
 #define MEM_BUF_SIZE(size) (sizeof(cache_t<size>) * MAX_NUM_MEM_REFS)
+#endif
 
 // total number of trace buffers
 #define TRACE_BUFFER_NUM 18

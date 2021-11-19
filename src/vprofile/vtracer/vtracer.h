@@ -1,6 +1,13 @@
 #ifndef __VTRACER_H__
 #define __VTRACER_H__
 
+#include "../common/log.h"
+#ifdef DEBUG
+#define VTRACER_LOG(level, format, args...) LOG("<vtracer>", level, format, ##args)
+#else
+#define VTRACER_LOG(level, format, args...)
+#endif
+
 enum {
     /** Priority of drx_buf thread init event */
     DRMGR_PRIORITY_THREAD_INIT_TRACE_BUF = -7500,
