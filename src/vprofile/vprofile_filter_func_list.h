@@ -33,7 +33,7 @@ VPROFILE_FILTER_MEM_WRITE_INSTR(instr_t *instr)
 /* TODO: Operand Filters, including all opnd, mem only, mem read only, mem write only, reg only, reg read only, reg write only */
 DR_EXPORT
 bool 
-VPROFILE_FILTER_ALL_OPND(opnd_t opnd) {
+VPROFILE_FILTER_ALL_OPND(opnd_t opnd, vprofile_src_t opmask) {
     return true;
 }
 

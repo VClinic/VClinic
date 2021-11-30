@@ -33,7 +33,7 @@ typedef struct {
     byte *buf_base;    /* the actual base of the buffer */
     size_t total_size; /* the actual size of the buffer */
 #ifdef VTRACER_DEBUG
-    ushort scratch;
+    int16_t scratch;
 #endif
 } per_thread_t;
 
@@ -1139,8 +1139,11 @@ void insert_trace_for_gpr(void *drcontext, instrlist_t *ilist, instr_t *where,
   // if there are register used in this operand, we directly use this operand
   reg_id_t reg_used;
   reg_used = opnd_get_reg_used(gpr_opnd, 0);
-  DR_ASSERT_MSG(reg_is_gpr(reg_used) || reg_used == DR_REG_XZR || reg_used == DR_REG_WZR,
-                "insert_trace_for_gpr should only used for GPR operand!");
+    DR_ASSERT_MSG(reg_is_gpr(reg_used) 
+#ifdef AARCH64  
+  || reg_used == DR_REG_XZR || reg_used == DR_REG_WZR
+#endif  
+  , "insert_trace_for_gpr should only used for GPR operand!");
   // get the operand size to resize the scratch registers
   opnd_size_t opsz = opnd_get_size(gpr_opnd);
 
@@ -1239,7 +1242,11 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
             return;
         }
 #endif
-        if(reg_is_gpr(reg) || reg == DR_REG_XZR || reg == DR_REG_WZR) {
+        if(reg_is_gpr(reg) 
+#ifdef AARCH64        
+        || reg == DR_REG_XZR || reg == DR_REG_WZR
+#endif
+        ) {
             switch(size) {
                 case 1:
                     insert_trace_for_gpr<1>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);

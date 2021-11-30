@@ -104,6 +104,12 @@ zerospy_filter_read_mem_access_instr(instr_t *instr)
     return instr_reads_memory(instr) && !instr_is_prefetch(instr) && !instr_is_gather(instr) && !instr_is_scatter(instr);
 }
 
+bool 
+VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
+    uint32_t user_mask = MEMORY | READ | BEFORE;
+    return ((user_mask & opmask) == opmask);
+}
+
 #define ZEROSPY_FILTER_READ_MEM_ACCESS_INSTR zerospy_filter_read_mem_access_instr
 
 vtrace_t* vtrace;
@@ -139,7 +145,6 @@ struct FPRedLog_t{
 typedef std::map<context_handle_t, INTRedLog_t> INTRedLogMap_t;
 typedef std::map<context_handle_t, FPRedLog_t> FPRedLogMap_t;
 
-#define MINSERT instrlist_meta_preinsert
 #define delta 0.01
 #define MAX_REDUNDANT_CONTEXTS_TO_LOG (1000)
 // maximum cct depth to print
@@ -1438,33 +1443,35 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
 
     dr_register_exit_event(ClientExit);
 
-    vtrace = vprofile_allocate_trace(false, true, false, false, false); // trace_reg_in_mem?
+    vtrace = vprofile_allocate_trace(false, true, false, false, false, false);
+
+    uint32_t opnd_mask = MEMORY | READ | BEFORE;
 
     // Tracing Buffer
     // Integer 1 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_ALL_OPND, INT8, trace_update_cb<1,1,false>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT8, trace_update_cb<1,1,false>);
     // Integer 2 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_ALL_OPND, INT16, trace_update_cb<2,2,false>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT16, trace_update_cb<2,2,false>);
     // Integer 4 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_ALL_OPND, INT32, trace_update_cb<4,4,false>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT32, trace_update_cb<4,4,false>);
     // Integer 8 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_ALL_OPND, INT64, trace_update_cb<8,8,false>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT64, trace_update_cb<8,8,false>);
     // Integer 16 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_ALL_OPND, INT128, trace_update_cb<16,16,false>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT128, trace_update_cb<16,16,false>);
     // Integer 32 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_ALL_OPND, INT256, trace_update_cb<32,32,false>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT256, trace_update_cb<32,32,false>);
     // Floating Point Single
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_ALL_OPND, SPx1, trace_update_cb<4,4,true>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, SPx1, trace_update_cb<4,4,true>);
     // Floating Point Double
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_ALL_OPND, DPx1, trace_update_cb<8,8,true>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, DPx1, trace_update_cb<8,8,true>);
     // Floating Point 4*Single
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_ALL_OPND, SPx4, trace_update_cb<16,4,true>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, SPx4, trace_update_cb<16,4,true>);
     // Floating Point 2*Double
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_ALL_OPND, DPx2, trace_update_cb<16,8,true>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, DPx2, trace_update_cb<16,8,true>);
     // Floating Point 8*Single
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_ALL_OPND, SPx8, trace_update_cb<32,4,true>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, SPx8, trace_update_cb<32,4,true>);
     // Floating Point 4*Double
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_ALL_OPND, DPx4, trace_update_cb<32,8,true>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, DPx4, trace_update_cb<32,8,true>);
 }
 
 #ifdef __cplusplus

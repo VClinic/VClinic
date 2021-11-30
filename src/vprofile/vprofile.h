@@ -6,7 +6,6 @@
 // #include "vreporter/vreporter.h"
 #include "vtracer/vtracer.h"
 #include "vtracer/vtracer_define.h"
-#include "vprofile_filter_func_list.h"
 /* High-level Interfaces for VProfile Framework */
 #define VPROFILE_LOG(level, format, args...) LOG("<vprofile>", level, format, ##args)
 /* vprofile modes */
@@ -49,7 +48,9 @@ struct vtrace_t {
   bool trace_cct;
   bool trace_info;
   bool trace_reg_in_memref;
+  bool trace_before_write;
   bool strictly_ordered;
+  uint32_t opnd_mask;
   union {
     /* strictly_ordered, so only single buffer with extra tracing of data types
      * is allocated */
@@ -59,12 +60,57 @@ struct vtrace_t {
   };
 };
 
+// within int32
+enum vprofile_src_t {
+  INVALID=0x0,
+  // basic opnd attributes
+  GPR_REGISTER=0x1,
+  SIMD_REGISTER=0x2,
+  CTR_REGISTER=0x4,
+  OTH_REGISTER=0x8,
+  PC=0x10,
+  MEMORY=0x20,
+  IMMEDIATE=0x40,
+  // basic action attributes
+  READ=0x100,
+  WRITE=0x200,
+  // basic value profiling position attributes
+  // this is annotation of where the value trace point come from
+  // BEFORE is before the instruction execution, and
+  // AFTER is after the instruction execution.
+  BEFORE=0x1000,
+  AFTER=0x2000,
+  // derived attributes
+  REGISTER=(GPR_REGISTER|SIMD_REGISTER|CTR_REGISTER|OTH_REGISTER),
+  REGISTER_READ=(REGISTER|READ|BEFORE),
+  REGISTER_WRITE=(REGISTER|WRITE|AFTER),
+  REGISTER_BEFORE_WRITE=(REGISTER|WRITE|BEFORE),
+  PC_READ=(PC|READ|BEFORE),
+  PC_WRITE=(PC|WRITE|AFTER),
+  PC_BEFORE_WRITE=(PC|WRITE|BEFORE),
+  MEMORY_READ=(MEMORY|READ|BEFORE),
+  MEMORY_WRITE=(MEMORY|WRITE|BEFORE),
+  MEMORY_BEFORE_WRITE=(REGISTER|WRITE|BEFORE)
+};
+
+#define VPROFILE_OPND_MASK_ALL ((uint32_t)0xffffffff)
+
+#include "vprofile_filter_func_list.h"
+
 /* Data structure to pass the traced values into trace updating callbacks. Note
  * that some of the values may not be filled in to avoid unnecessary message
  * passing when the information can be assumed to be already known for the
  * caller (e.g., size/esize when not strictly_ordered, no addr info, etc). */
 struct val_info_t {
+  // if type & GPR_REGISTER, addr is gpr register id;
+  // else if type & SIMD_REGISTER, addr is simd register id;
+  // else if type & CTR_REGISTER, addr is control register id;
+  // else if type & OTH_REGISTER, addr is dynamorio register id;
+  // else if type & MEMORY, addr is a memory address
+  // else: undefined
   uint64_t addr;
+  // vprofile_src_t
+  uint32_t type;
   int32_t ctxt_hndl;
   void *val;
   void *info;
@@ -131,6 +177,8 @@ void vprofile_exit();
  * And examples of their usage can be found in the clients directory.
  *
  * @param filter the operand filter
+ * @param opnd_mask the mask to filter operand, should be OR combined with 
+ * values defined in @see vprofile_src_t.
  * @param update_cb the update function
  * allowing the user to update with the traced values when the buffer is full.
  * May be null.
@@ -144,10 +192,12 @@ void vprofile_exit();
  *   trace_cct=!do_data_centric,
  *   trace_info=false,
  *   strictly_ordered=true,
- *   trace_reg_in_memref=false
+ *   trace_reg_in_memref=false,
+ *   trace_before_write=false
  */
 DR_EXPORT
-vtrace_t *vprofile_register_trace(bool (*filter)(opnd_t),
+vtrace_t *vprofile_register_trace(bool (*filter)(opnd_t, vprofile_src_t),
+                                  uint32_t opnd_mask,
                                   void (*update_cb)(val_info_t *),
                                   bool do_data_centric);
 
@@ -163,6 +213,8 @@ vtrace_t *vprofile_register_trace(bool (*filter)(opnd_t),
  * And examples of their usage can be found in the clients directory.
  *
  * @param filter the operand filter
+ * @param opnd_mask the mask to filter operand, should be OR combined with 
+ * values defined in @see vprofile_src_t.
  * @param update_cb the update function
  * allowing the user to update with the traced values when the buffer is full.
  * May be null.
@@ -175,22 +227,27 @@ vtrace_t *vprofile_register_trace(bool (*filter)(opnd_t),
  * buffer and trace the data type of each access
  * @param trace_reg_in_memref tell VProfile tracer to trace the register values
  * used in memory operand
+ * @param trace_before_write tell VProfile tracer to trace the register/memory values 
+ * before overwritten (thus vprofile_src_t marked as WRITE|BEFORE)
  *
  * Return NULL when any failure detected
  */
 DR_EXPORT
-vtrace_t* vprofile_register_trace_ex(bool (*filter)(opnd_t),
+vtrace_t* vprofile_register_trace_ex(bool (*filter)(opnd_t, vprofile_src_t),
+                                     uint32_t opnd_mask,
                                      void (*update_cb)(val_info_t *),
                                      bool trace_addr, bool trace_cct,
                                      bool trace_info, bool strictly_ordered,
-                                     bool trace_reg_in_memref);
+                                     bool trace_reg_in_memref,
+                                     bool trace_before_write);
 
 /* Allocate a new vprofile trace data structure with the given configurations.
  * Note that the trace buffer is not registered (thus NULL). */
 DR_EXPORT
 vtrace_t* vprofile_allocate_trace(bool trace_addr, bool trace_cct,
                                   bool trace_info, bool strictly_ordered,
-                                  bool trace_reg_in_memref);
+                                  bool trace_reg_in_memref,
+                                  bool trace_before_write);
 
 /* Register update callbacks for the specified data_type within the given
  * vtrace. If the vtrace is configured as strictly_ordered, the data_type must
@@ -199,40 +256,34 @@ vtrace_t* vprofile_allocate_trace(bool trace_addr, bool trace_cct,
  * callbacks.
  */
 DR_EXPORT
-void vprofile_register_trace_cb(vtrace_t *vtrace, bool (*filter)(opnd_t),
+void vprofile_register_trace_cb(vtrace_t *vtrace, bool (*filter)(opnd_t, vprofile_src_t),
+                                uint32_t opnd_mask, 
                                 vprofile_data_t data_type,
                                 void (*update_cb)(val_info_t *));
 
-#define vprofile_register_trace_template_cb(vtrace, filter, update_cb) do {\
-  vprofile_register_trace_cb(vtrace, filter, INT8, update_cb<1,1,false>);\
-  vprofile_register_trace_cb(vtrace, filter, INT16, update_cb<2,2,false>);\
-  vprofile_register_trace_cb(vtrace, filter, INT32, update_cb<4,4,false>);\
-  vprofile_register_trace_cb(vtrace, filter, SPx1, update_cb<4,4,true>);\
-  vprofile_register_trace_cb(vtrace, filter, INT64, update_cb<8,8,false>);\
-  vprofile_register_trace_cb(vtrace, filter, DPx1, update_cb<8,8,true>);\
-  vprofile_register_trace_cb(vtrace, filter, INT128, update_cb<16,16,false>);\
-  vprofile_register_trace_cb(vtrace, filter, INT8x16, update_cb<16,1,false>);\
-  vprofile_register_trace_cb(vtrace, filter, SPx4, update_cb<16,4,true>);\
-  vprofile_register_trace_cb(vtrace, filter, DPx2, update_cb<16,8,true>);\
-  vprofile_register_trace_cb(vtrace, filter, INT256, update_cb<32,32,false>);\
-  vprofile_register_trace_cb(vtrace, filter, INT8x32, update_cb<32,1,false>);\
-  vprofile_register_trace_cb(vtrace, filter, SPx8, update_cb<32,4,true>);\
-  vprofile_register_trace_cb(vtrace, filter, DPx4, update_cb<32,8,true>);\
-  vprofile_register_trace_cb(vtrace, filter, INT512, update_cb<64,64,false>);\
-  vprofile_register_trace_cb(vtrace, filter, INT8x64, update_cb<64,1,false>);\
-  vprofile_register_trace_cb(vtrace, filter, SPx16, update_cb<64,4,true>);\
-  vprofile_register_trace_cb(vtrace, filter, DPx8, update_cb<64,8,true>); \
+#define vprofile_register_trace_template_cb(vtrace, filter, opnd_mask, update_cb) do {\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, INT8, update_cb<1,1,false>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, INT16, update_cb<2,2,false>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, INT32, update_cb<4,4,false>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, SPx1, update_cb<4,4,true>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, INT64, update_cb<8,8,false>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, DPx1, update_cb<8,8,true>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, INT128, update_cb<16,16,false>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, INT8x16, update_cb<16,1,false>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, SPx4, update_cb<16,4,true>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, DPx2, update_cb<16,8,true>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, INT256, update_cb<32,32,false>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, INT8x32, update_cb<32,1,false>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, SPx8, update_cb<32,4,true>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, DPx4, update_cb<32,8,true>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, INT512, update_cb<64,64,false>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, INT8x64, update_cb<64,1,false>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, SPx16, update_cb<64,4,true>);\
+  vprofile_register_trace_cb(vtrace, filter, opnd_mask, DPx8, update_cb<64,8,true>); \
 } while(0)
 
 /* Clear and free all the data allocated in the given vtrace */
 DR_EXPORT
 void vprofile_unregister_trace(vtrace_t *vtrace);
-
-// This will be hidden beneath the vprofile abstraction via user_data_cb
-// /* Insert inlined instrumentation codes to trace user-specified additional information */
-// DR_EXPORT
-// void vprofile_insert_trace_info(void *drcontext, instr_t *where,
-//                                 instrlist_t *ilist, vtrace_t *vtrace,
-//                                 void *info);
 
 #endif

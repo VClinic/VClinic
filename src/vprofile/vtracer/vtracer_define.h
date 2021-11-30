@@ -77,3 +77,15 @@ inline void getUnusedRegEntryInstr(drvector_t* allowed, instr_t* instr) {
         fillUnusedRegEntry(allowed, instr_get_dst(instr, j));
     }
 }
+
+inline void getUnusedRegEntryInstrWithoutInit(drvector_t* allowed, instr_t* instr) {
+    int num;
+    num = instr_num_srcs(instr);
+    for(int j = 0; j < num; j++) {
+        fillUnusedRegEntry(allowed, instr_get_src(instr, j));
+    }
+    num = instr_num_dsts(instr);
+    for(int j = 0; j < num; j++) {
+        fillUnusedRegEntry(allowed, instr_get_dst(instr, j));
+    }
+}
