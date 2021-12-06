@@ -986,6 +986,7 @@ void vprofile_update_cb_ctxt(void *buf_base, void *buf_end, void* user_data)
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.addr = cache_ptr->addr;
         user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
         user_info.val = (void *) cache_ptr->val;
@@ -1004,6 +1005,7 @@ void vprofile_update_cb_ctxt_no_info(void *buf_base, void *buf_end, void* user_d
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.addr = cache_ptr->addr;
         user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
         user_info.val = (void *) cache_ptr->val;
@@ -1021,6 +1023,7 @@ void vprofile_update_cb_ctxt_no_info_addr(void *buf_base, void *buf_end, void* u
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
         user_info.val = (void *) cache_ptr->val;
         user_info.size = cache_ptr->size;
@@ -1037,6 +1040,7 @@ void vprofile_update_cb_ctxt_no_addr(void *buf_base, void *buf_end, void* user_d
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
         user_info.val = (void *) cache_ptr->val;
         user_info.info = cache_ptr->info;
@@ -1055,6 +1059,7 @@ void vprofile_update_cb_ctxt_no_sz(void *buf_base, void *buf_end, void* user_dat
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.addr = cache_ptr->addr;
         user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
         user_info.val = (void *) cache_ptr->val;
@@ -1071,6 +1076,7 @@ void vprofile_update_cb_ctxt_no_info_sz(void *buf_base, void *buf_end, void* use
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.addr = cache_ptr->addr;
         user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
         user_info.val = (void *) cache_ptr->val;
@@ -1086,6 +1092,7 @@ void vprofile_update_cb_ctxt_no_info_addr_sz(void *buf_base, void *buf_end, void
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
         user_info.val = (void *) cache_ptr->val;
         (*((void (*)(val_info_t *)) user_data))(&user_info);
@@ -1100,6 +1107,7 @@ void vprofile_update_cb_ctxt_no_addr_sz(void *buf_base, void *buf_end, void* use
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
         user_info.val = (void *) cache_ptr->val;
         user_info.info = cache_ptr->info;
@@ -1114,6 +1122,7 @@ void vprofile_update_cb(void *buf_base, void *buf_end, void* user_data)
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.addr = cache_ptr->addr;
         user_info.val = (void *) cache_ptr->val;
         user_info.info = cache_ptr->info;
@@ -1131,6 +1140,7 @@ void vprofile_update_cb_no_info(void *buf_base, void *buf_end, void* user_data)
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.addr = cache_ptr->addr;
         user_info.val = (void *) cache_ptr->val;
         user_info.size = cache_ptr->size;
@@ -1147,6 +1157,7 @@ void vprofile_update_cb_no_info_addr(void *buf_base, void *buf_end, void* user_d
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.val = (void *) cache_ptr->val;
         user_info.size = cache_ptr->size;
         user_info.esize = cache_ptr->esize;
@@ -1162,6 +1173,7 @@ void vprofile_update_cb_no_addr(void *buf_base, void *buf_end, void* user_data)
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.val = (void *) cache_ptr->val;
         user_info.info = cache_ptr->info;
         user_info.size = cache_ptr->size;
@@ -1179,6 +1191,7 @@ void vprofile_update_cb_no_sz(void *buf_base, void *buf_end, void* user_data)
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.addr = cache_ptr->addr;
         user_info.val = (void *) cache_ptr->val;
         user_info.info = cache_ptr->info;
@@ -1194,6 +1207,7 @@ void vprofile_update_cb_no_info_sz(void *buf_base, void *buf_end, void* user_dat
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.addr = cache_ptr->addr;
         user_info.val = (void *) cache_ptr->val;
         (*((void (*)(val_info_t *)) user_data))(&user_info);
@@ -1208,6 +1222,7 @@ void vprofile_update_cb_no_info_addr_sz(void *buf_base, void *buf_end, void* use
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.val = (void *) cache_ptr->val;
         (*((void (*)(val_info_t *)) user_data))(&user_info);
     }
@@ -1221,6 +1236,7 @@ void vprofile_update_cb_no_addr_sz(void *buf_base, void *buf_end, void* user_dat
     val_info_t user_info;
     for(; cache_ptr<cache_end; ++cache_ptr) {
         // extract data from cache
+        user_info.type = cache_ptr->type;
         user_info.val = (void *) cache_ptr->val;
         user_info.info = cache_ptr->info;
         (*((void (*)(val_info_t *)) user_data))(&user_info);
@@ -1628,9 +1644,14 @@ vtrace_t* vprofile_register_trace_ex(bool (*filter)(opnd_t, vprofile_src_t),
 void vprofile_unregister_trace(vtrace_t *vtrace)
 {
     if(!vtrace) return;
-    for(int i = 0; i < NUM_DATA_TYPES; i++) {
-        if(vtrace->buff_ex[i]!=NULL)
-            vtracer_buffer_free(vtrace->buff_ex[i]);
+    if(vtrace->strictly_ordered) {
+        if(vtrace->buff!=NULL)
+            vtracer_buffer_free(vtrace->buff);
+    } else {
+        for(int i = 0; i < NUM_DATA_TYPES; i++) {
+            if(vtrace->buff_ex[i]!=NULL)
+                vtracer_buffer_free(vtrace->buff_ex[i]);
+        }
     }
     dr_global_free(vtrace, sizeof(*vtrace));
 }

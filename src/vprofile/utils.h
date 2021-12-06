@@ -289,6 +289,8 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
         //return 16;
 
     case OP_vmovss:
+    case OP_movups:
+    case OP_movaps:
     case OP_vmovups:
     case OP_vmovlps:
     case OP_vmovsldup:
@@ -310,11 +312,13 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
     case OP_vshufps:
         return 4;
 
+    case OP_andpd:
     case OP_vmovsd:
     case OP_vmovupd:
     case OP_vmovlpd:
     case OP_vmovddup:
     case OP_vmovhpd:
+    case OP_movapd:
     case OP_vmovapd:
     case OP_vmovntpd:
     case OP_unpcklpd:
@@ -514,8 +518,13 @@ IntegerOperandSizeTable(instr_t *instr, opnd_t opnd)
 
     int opc = instr_get_opcode(instr);
 
+    if(opc == OP_vmovdqu || opc == OP_vmovdqa) {
+        return size;
+    }
+
     switch (opc) {
         case OP_pmovmskb:
+        case OP_vpcmpeqb:
         case OP_pcmpeqb:
         case OP_pxor:
 	    case OP_paddb:
