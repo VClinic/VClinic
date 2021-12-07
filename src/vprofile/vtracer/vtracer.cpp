@@ -9,6 +9,7 @@
 
 #ifdef DEBUG
     #define VTRACER_DEBUG
+//    #define VTRACER_DEBUG_DETAIL
 #endif
 
 #define ALIGNED(x, alignment) ((((ptr_uint_t)x) & ((alignment)-1)) == 0)
@@ -1310,35 +1311,6 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
         assert(false && "Unknown operand type!\n");
     }
     VTRACER_LOG(SUMMARY, "exit vtracer_insert_trace_val: successfully\n");
-}
-
-template <typename T>
-void vtracer_insert_trace_constant(void *drcontext, instr_t *where,
-                                   instrlist_t *ilist, T val, reg_id_t reg_ptr,
-                                   reg_id_t scratch, ushort offset)
-{
-    VTRACER_LOG(SUMMARY, "enter vtracer_insert_trace_constant\n");
-    switch (sizeof(T)) {
-        case 1:
-            vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr, DR_REG_NULL,
-                            OPND_CREATE_INT8(val), OPSZ_1, offset);
-            break;
-        case 2:
-            vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr, DR_REG_NULL,
-                            OPND_CREATE_INT16(val), OPSZ_2, offset);
-            break;
-        case 4:
-            vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr, DR_REG_NULL,
-                            OPND_CREATE_INT32(val), OPSZ_4, offset);
-            break;
-        case 8:
-            vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr, DR_REG_NULL,
-                            OPND_CREATE_INT64(val), OPSZ_PTR, offset);
-            break;
-        default:
-            assert(false && "Unknown constant size!\n");
-    }
-    VTRACER_LOG(SUMMARY, "exit vtracer_insert_trace_constant\n");
 }
 
 bool instr_is_ignorable(instr_t *ins) {

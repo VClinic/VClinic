@@ -37,4 +37,6 @@ VPROFILE_FILTER_ALL_OPND(opnd_t opnd, vprofile_src_t opmask) {
     return true;
 }
 
+#define VPROFILE_DEFAULT_OPND_FILTER VPROFILE_FILTER_ALL_OPND
+
 #endif

@@ -608,3 +608,11 @@ bool instr_is_floating(instr_t* instr) {
     return is_float;
 }
 #endif
+
+// Some instr may result in floating point instruction, 
+// while opnd may be integer (e.g., convert instruction)
+bool opnd_is_floating(instr_t* instr, opnd_t opnd) {
+    // currently, we just simply return the result of the instruction type
+    // TODO: make a more accurate table for X86/ARM
+    return instr_is_floating(instr);
+}

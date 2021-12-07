@@ -44,12 +44,7 @@ enum vprofile_data_t {
 
 /* Data structure to store information of a registered trace */
 struct vtrace_t {
-  bool trace_addr;
-  bool trace_cct;
-  bool trace_info;
-  bool trace_reg_in_memref;
-  bool trace_before_write;
-  bool strictly_ordered;
+  uint32_t trace_flag;
   uint32_t opnd_mask;
   union {
     /* strictly_ordered, so only single buffer with extra tracing of data types
@@ -80,6 +75,10 @@ enum vprofile_src_t {
   // AFTER is after the instruction execution.
   BEFORE=0x1000,
   AFTER=0x2000,
+  // is floating
+  IS_INTEGER=0x4000,
+  IS_FLOATING=0x8000,
+  ANY_DATA_TYPE=(IS_INTEGER|IS_FLOATING),
   // derived attributes
   REGISTER=(GPR_REGISTER|SIMD_REGISTER|CTR_REGISTER|OTH_REGISTER),
   REGISTER_READ=(REGISTER|READ|BEFORE),
@@ -94,6 +93,44 @@ enum vprofile_src_t {
 };
 
 #define VPROFILE_OPND_MASK_ALL ((uint32_t)0xffffffff)
+
+#define FILTER_OPND_MASK(filter_mask, opnd_mask) ((filter_mask & opnd_mask) == opnd_mask)
+#define TEST_OPND_MASK(target_mask, tester) FILTER_OPND_MASK(target_mask, tester)
+enum {
+  VPROFILE_TRACE_INVALID=0x0,
+  VPROFILE_TRACE_VALUE=0x1,
+  VPROFILE_TRACE_ADDR=0x2,
+  VPROFILE_TRACE_CCT=0x4,
+  VPROFILE_TRACE_INFO=0x8,
+  VPROFILE_TRACE_STRICTLY_ORDERED=0x10,
+  VPROFILE_TRACE_REG_IN_MEMREF=0x20,
+  VPROFILE_TRACE_BEFORE_WRITE=0x40,
+  // DEFAULT
+  VPROFILE_TRACE_DEFAULT=VPROFILE_TRACE_VALUE,
+  // valid combinations
+  VPROFILE_TRACE_VAL_CCT_ADDR_INFO = 
+    VPROFILE_TRACE_VALUE | VPROFILE_TRACE_CCT | VPROFILE_TRACE_ADDR | VPROFILE_TRACE_INFO,
+  VPROFILE_TRACE_VAL_CCT_ADDR = 
+    VPROFILE_TRACE_VALUE | VPROFILE_TRACE_CCT | VPROFILE_TRACE_ADDR,
+  VPROFILE_TRACE_VAL_CCT_INFO = 
+    VPROFILE_TRACE_VALUE | VPROFILE_TRACE_CCT | VPROFILE_TRACE_INFO,
+  VPROFILE_TRACE_VAL_CCT =
+    VPROFILE_TRACE_VALUE | VPROFILE_TRACE_CCT,
+  VPROFILE_TRACE_VAL_ADDR_INFO = 
+    VPROFILE_TRACE_VALUE | VPROFILE_TRACE_ADDR | VPROFILE_TRACE_INFO,
+  VPROFILE_TRACE_VAL_ADDR = 
+    VPROFILE_TRACE_VALUE | VPROFILE_TRACE_ADDR,
+  VPROFILE_TRACE_VAL_INFO = 
+    VPROFILE_TRACE_VALUE | VPROFILE_TRACE_INFO,
+  VPROFILE_TRACE_CCT_ADDR_INFO = 
+    VPROFILE_TRACE_CCT | VPROFILE_TRACE_ADDR | VPROFILE_TRACE_INFO,
+  VPROFILE_TRACE_CCT_ADDR = 
+    VPROFILE_TRACE_CCT | VPROFILE_TRACE_ADDR,
+  VPROFILE_TRACE_CCT_INFO = 
+    VPROFILE_TRACE_CCT | VPROFILE_TRACE_INFO,
+  VPROFILE_TRACE_ADDR_INFO = 
+    VPROFILE_TRACE_ADDR | VPROFILE_TRACE_INFO
+};
 
 #include "vprofile_filter_func_list.h"
 
@@ -218,16 +255,18 @@ vtrace_t *vprofile_register_trace(bool (*filter)(opnd_t, vprofile_src_t),
  * @param update_cb the update function
  * allowing the user to update with the traced values when the buffer is full.
  * May be null.
- * @param trace_addr tell VProfile tracer to trace memory address/source
+ * @param trace_flag the tracing flag setting for this registered trace, including:
+ * @param VPROFILE_TRACE_VALUE tell VProfile tracer to trace value of a opnd
+ * @param VPROFILE_TRACE_ADDR tell VProfile tracer to trace memory address/source
  * register.
- * @param trace_cct tell VProfile tracer to trace calling context
- * @param trace_info tell VProfile tracer to trace additional info specified by
+ * @param VPROFILE_TRACE_CCT tell VProfile tracer to trace calling context
+ * @param VPROFILE_TRACE_INFO tell VProfile tracer to trace additional info specified by
  * the user
- * @param strictly_ordered tell VProfile to trace the value in a single trace
+ * @param VPROFILE_TRACE_STRICTLY_ORDERED tell VProfile to trace the value in a single trace
  * buffer and trace the data type of each access
- * @param trace_reg_in_memref tell VProfile tracer to trace the register values
+ * @param VPROFILE_TRACE_REG_IN_MEMREF tell VProfile tracer to trace the register values
  * used in memory operand
- * @param trace_before_write tell VProfile tracer to trace the register/memory values 
+ * @param VPROFILE_TRACE_BEFORE_WRITE tell VProfile tracer to trace the register/memory values 
  * before overwritten (thus vprofile_src_t marked as WRITE|BEFORE)
  *
  * Return NULL when any failure detected
@@ -236,18 +275,12 @@ DR_EXPORT
 vtrace_t* vprofile_register_trace_ex(bool (*filter)(opnd_t, vprofile_src_t),
                                      uint32_t opnd_mask,
                                      void (*update_cb)(val_info_t *),
-                                     bool trace_addr, bool trace_cct,
-                                     bool trace_info, bool strictly_ordered,
-                                     bool trace_reg_in_memref,
-                                     bool trace_before_write);
+                                     uint32_t trace_flag);
 
 /* Allocate a new vprofile trace data structure with the given configurations.
  * Note that the trace buffer is not registered (thus NULL). */
 DR_EXPORT
-vtrace_t* vprofile_allocate_trace(bool trace_addr, bool trace_cct,
-                                  bool trace_info, bool strictly_ordered,
-                                  bool trace_reg_in_memref,
-                                  bool trace_before_write);
+vtrace_t* vprofile_allocate_trace(uint32_t trace_flag);
 
 /* Register update callbacks for the specified data_type within the given
  * vtrace. If the vtrace is configured as strictly_ordered, the data_type must

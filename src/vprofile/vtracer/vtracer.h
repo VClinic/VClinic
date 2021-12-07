@@ -221,7 +221,29 @@ template <typename T>
 DR_EXPORT
 void vtracer_insert_trace_constant(void *drcontext, instr_t *where,
                                    instrlist_t *ilist, T val, reg_id_t reg_ptr,
-                                   reg_id_t scratch, ushort offset);
+                                   reg_id_t scratch, ushort offset)
+{
+    /* inlined implementation to avoid undefined symbol error during usage */
+    VTRACER_LOG(SUMMARY, "enter vtracer_insert_trace_constant\n");
+    switch (sizeof(T)) {
+        case 1:
+            vtracer_insert_trace_val(drcontext, where, ilist, OPND_CREATE_INT8(val), reg_ptr, scratch, offset);
+            break;
+        case 2:
+            vtracer_insert_trace_val(drcontext, where, ilist, OPND_CREATE_INT16(val), reg_ptr, scratch, offset);
+            break;
+        case 4:
+            vtracer_insert_trace_val(drcontext, where, ilist, OPND_CREATE_INT32(val), reg_ptr, scratch, offset);
+            break;
+        case 8:
+            vtracer_insert_trace_val(drcontext, where, ilist, OPND_CREATE_INT64(val), reg_ptr, scratch, offset);
+            break;
+        default:
+            DR_ASSERT_MSG(false, "Unknown constant size!\n");
+    }
+    VTRACER_LOG(SUMMARY, "exit vtracer_insert_trace_constant\n");
+}
+
 
 /**
  * Mark some instructions like nop are ignorable.

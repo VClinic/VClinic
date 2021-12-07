@@ -139,18 +139,11 @@ static droption_t<bool> KnobTopN
     DRCCTLIB_CLIENT_EXIT_PROCESS_TEMPLATE("deadspy", format, \
                                           ##args)
 
-// We only interest in memory loads
-bool 
-VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
-    uint32_t user_mask = (MEMORY | READ | BEFORE | WRITE | AFTER);
-    return ((user_mask & opmask) == opmask);
-}
-
 bool
 DEADSPY_FILTER_MEM_ACCESS_INSTR(instr_t *instr) {
     if(!VPROFILE_FILTER_MEM_ACCESS_INSTR(instr)) return false;
 #ifdef X86
-    if(instr_is_xsave(ins)) {
+    if(instr_is_xsave(instr)) {
         return false;
     }
 
@@ -587,12 +580,15 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
 
     dr_register_exit_event(ClientExit);
 
-    vtrace = vprofile_allocate_trace(true, true, false, true, false, false);
+    uint32_t trace_flag = VPROFILE_TRACE_CCT_ADDR | VPROFILE_TRACE_STRICTLY_ORDERED;
 
-    uint32_t opnd_mask = (MEMORY | READ | BEFORE | WRITE | AFTER);
+    vtrace = vprofile_allocate_trace(trace_flag);
+
+    // We only interest in memory loads
+    uint32_t opnd_mask = (ANY_DATA_TYPE | MEMORY | READ | BEFORE | WRITE | AFTER);
 
     // Tracing Buffer
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, ANY, trace_update_cb);
+    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, ANY, trace_update_cb);
 }
 
 #ifdef __cplusplus

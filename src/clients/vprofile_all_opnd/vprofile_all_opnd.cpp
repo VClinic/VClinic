@@ -32,7 +32,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     ClientInit(argc, argv);
     vprofile_init(VPROFILE_FILTER_ALL_INSTR, NULL, NULL, NULL,
                      VPROFILE_DEFAULT);
-    vtrace = vprofile_allocate_trace(false, false, false, false, false, true);
+    vtrace = vprofile_allocate_trace(VPROFILE_TRACE_DEFAULT | VPROFILE_TRACE_BEFORE_WRITE);
     vprofile_register_trace_template_cb(vtrace, VPROFILE_FILTER_ALL_OPND, VPROFILE_OPND_MASK_ALL, update);
     dr_register_exit_event(ClientExit);
 }

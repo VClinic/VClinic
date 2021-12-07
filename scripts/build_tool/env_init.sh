@@ -47,6 +47,7 @@ do
     ln -s $DRCCTLIB_CLIENTS_ROOT_PATH/$CLIENT $DYNAMORIO_CLIENT_PATH/$CLIENT
 done
 
-cd $CUR_DIR/temp_solution
-./aarch64-fix.sh
-cd $CUR_DIR
+# no need to hotfix after the latest patch merged into dynamorio
+# cd $CUR_DIR/temp_solution
+# ./aarch64-fix.sh
+# cd $CUR_DIR

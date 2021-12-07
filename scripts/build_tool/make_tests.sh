@@ -65,8 +65,23 @@ $DRRUN -- echo hi > /dev/null &&
     echo -e "\033[32m----------PASSED---------\033[0m" ||
         (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
 
-echo -e "\033[32m----------Test 1 (null tool single thread)---------\033[0m"
-$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t trivialspy -- $TEST_APP1_FULL_PATH > /dev/null &&
+echo -e "\033[32m----------Test 1 (vprofile_all_opnd tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t vprofile_all_opnd -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+echo -e "\033[32m----------Test 1 (vtrace_all_opnd tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t vtrace_all_opnd -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+echo -e "\033[32m----------Test 1 (zerospy tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t zerospy -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+echo -e "\033[32m----------Test 1 (deadspy tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t deadspy -- /bin/ls > /dev/null &&
     echo -e "\033[32m----------PASSED---------\033[0m" ||
         (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
 
