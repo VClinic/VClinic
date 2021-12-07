@@ -2,6 +2,7 @@
 #define __TRIVIAL_DETECTOR_H__
 
 #include <stdint.h>
+#include "trivial_table.h"
 
 static double epsilon = 1e-4;
 static int bit_cnt = 0;
@@ -126,7 +127,7 @@ struct ApproxUnrolledTrivialCounter<T, end, end, targ, maskOp> {
 template<class T, int num, ConditionVal_t cond>
 struct TrivialDetector {
     static inline __attribute__((always_inline))
-    int run(void* val_ptr) {
+    bool run(void* val_ptr) {
         int trivial_num = 0;
         if(cond==ConditionVal_t::IS_ZERO) {
             trivial_num = UnrolledTrivialCounter<T, 0, num, 0>::run((T*)val_ptr);
@@ -135,28 +136,28 @@ struct TrivialDetector {
         } else if(cond==ConditionVal_t::IS_FULL) {
             trivial_num = UnrolledTrivialCounter<T, 0, num, -1>::run((T*)val_ptr);
         }
-        return trivial_num;
+        return trivial_num==num;
     }
 };
 
 template<class T, int num, ConditionVal_t cond>
 struct ApproxTrivialDetectorSoft {
     static inline __attribute__((always_inline))
-    int run(void* val_ptr) {
+    bool run(void* val_ptr) {
         int trivial_num = 0;
         if(cond==ConditionVal_t::IS_ZERO) {
             trivial_num = ApproxUnrolledTrivialCounter<T, 0, num, 0, MASK_OP_NONE>::run_soft((T*)val_ptr, epsilon);
         } else if(cond==ConditionVal_t::IS_ONE) {
             trivial_num = ApproxUnrolledTrivialCounter<T, 0, num, 1, MASK_OP_NONE>::run_soft((T*)val_ptr, epsilon);
         }
-        return trivial_num;
+        return trivial_num==num;
     }
 };
 
 template<int num, ConditionVal_t cond>
 struct ApproxTrivialDetectorHard {
     static inline __attribute__((always_inline))
-    int run_single(void* vptr) {
+    bool run_single(void* vptr) {
         uint32_t* val_ptr = reinterpret_cast<uint32_t*>(vptr);
         int trivial_num = 0;
         if(cond==ConditionVal_t::IS_ZERO) {
@@ -167,11 +168,11 @@ struct ApproxTrivialDetectorHard {
             // val <  1 Approximations 
             trivial_num+= ApproxUnrolledTrivialCounter<uint32_t, 0, num, APPROX_LT_ONE_SP, MASK_OP_OR>::run_hard(val_ptr, approx_mask_sp[2]);
         }
-        return trivial_num;
+        return trivial_num==num;
     }
 
     static inline __attribute__((always_inline))
-    int run_double(void* vptr) {
+    bool run_double(void* vptr) {
         uint64_t* val_ptr = reinterpret_cast<uint64_t*>(vptr);
         int trivial_num = 0;
         if(cond==ConditionVal_t::IS_ZERO) {
@@ -182,11 +183,12 @@ struct ApproxTrivialDetectorHard {
             // val <  1 Approximations 
             trivial_num+= ApproxUnrolledTrivialCounter<uint64_t, 0, num, APPROX_LT_ONE_DP, MASK_OP_OR>::run_hard(val_ptr, approx_mask_dp[2]);
         }
-        return trivial_num;
+        return trivial_num==num;
     }
 };
 
-typedef int (*trivial_func_t)(void* val);
+typedef bool (*trivial_detector_t)(void*);
+
 #define ENCODE_TEMPLATE_PARA(is_float, size, esize, val) (((is_float)?1LL:0LL) | (uint64_t)(size)<<1 | (uint64_t)(esize)<<16 | (uint64_t)(val)<<28)
 
 /* <is_float:0,1>, <esize:0(1),1(2),2(4),3(8)>, <size:0(1),1(2),2(4),3(8),4(16),5(32)>, <val:0(IS_ZERO),1(IS_ONE),2(IS_FULL)> */
@@ -198,7 +200,7 @@ typedef int (*trivial_func_t)(void* val);
 
 #define get_detector_from_table(is_float, esize, size, val) _detector_table[get_idx_is_float(is_float)][get_idx_size(esize)][get_idx_size(size)][get_idx_val(val)]
 
-static trivial_func_t _detector_table[2][4][6][3][3/*3 mode: trivial, soft, hard*/] = {
+static trivial_detector_t _detector_table[2][4][6][3][3/*3 mode: trivial, soft, hard*/] = {
     { /*is_float=0 enter*/
     { /* esize=1 enter */
     { /* size=1 enter */
@@ -515,7 +517,7 @@ static trivial_func_t _detector_table[2][4][6][3][3/*3 mode: trivial, soft, hard
 
 struct TrivialDetectorTable {
     inline __attribute__((always_inline))
-    static trivial_func_t* get(ConditionVal_t val, int size, int esize, bool is_float) {
+    static trivial_detector_t* get(ConditionVal_t val, int size, int esize, bool is_float) {
 #ifdef DEBUG
         DPRINTF("Query: val=%s, size=%d, esize=%d, is_float=%d\n", getConditionValString(val), size, esize, is_float);
         DPRINTF("==> [is_float=%d][esize=%d][size=%d][val=%d]\n", get_idx_is_float(is_float), get_idx_size(esize), get_idx_size(size), get_idx_val(val));
@@ -530,5 +532,16 @@ struct TrivialDetectorTable {
         return get_detector_from_table(is_float, esize, size, val);
     }
 };
+
+enum {
+    TRIVIAL_DETECTOR_EXACT=0,
+    TRIVIAL_DETECTOR_APPROX_SOFT=1,
+    TRIVIAL_DETECTOR_APPROX_HARD=2
+};
+
+trivial_detector_t getTrivialDetector(ConditionVal_t val, ConditionListInfo_t info, int mode) {
+    DR_ASSERT(mode==TRIVIAL_DETECTOR_EXACT || mode==TRIVIAL_DETECTOR_APPROX_SOFT || mode==TRIVIAL_DETECTOR_APPROX_HARD);
+    return TrivialDetectorTable::get(val, info.size, info.esize, info.is_float)[mode];
+}
 
 #endif

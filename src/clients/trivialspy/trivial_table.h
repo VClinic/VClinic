@@ -6,6 +6,7 @@
 #include "drreg.h"
 #include "drutil.h"
 #include "drsyms.h"
+#include "drcctlib.h"
 #include "drcctlib_defines.h"
 #include "trivial_define.h"
 #include <vector>
@@ -45,6 +46,17 @@ enum ResultVal_t {
 };
 
 inline
+ResultVal_t convertCVal2Res(ConditionVal_t val) {
+    switch(val) {
+        case IS_ZERO: return ZERO;
+        case IS_ONE: return ONE;
+        case IS_FULL: return FULL;
+        default:
+            return UNKNOWN;
+    }
+}
+
+inline
 ConditionVal_t convertRes2CVal(ResultVal_t res) {
     switch(res) {
         case ZERO: return IS_ZERO;
@@ -59,7 +71,7 @@ ConditionVal_t convertRes2CVal(ResultVal_t res) {
 }
 
 inline
-const char* getResultVallString(ResultVal_t val) {
+const char* getResultValString(ResultVal_t val) {
     switch(val) {
         case INVALID: return "INVALID";
         case ZERO: return "ZERO";
@@ -150,6 +162,150 @@ typedef std::unordered_map<int, std::string> TrivialOpStrMap_t;
 static TrivialOpMap_t trivial_op_table;
 static TrivialOpStrMap_t trivial_op_str_table;
 
+typedef struct {
+    std::vector<reg_id_t> reg_in;
+    reg_id_t reg_out;
+    // trivial conditions
+    ConditionList_t** condlist;
+    // trivial results
+} trivial_func_info_t;
+static std::unordered_map<int, trivial_func_info_t> trivial_func_table;
+
+// static bool getTargetFuncName(instr_t* instr, app_pc addr, char* name) {
+//     drsym_error_t symres;
+//     drsym_info_t sym;
+//     char file[MAXIMUM_PATH];
+//     module_data_t *data = dr_lookup_module(addr);
+//     if (data == NULL) {
+// #ifdef DEBUG_TRIVIALSPY
+//         dr_fprintf(STDOUT, "dr_lookup_module failed: Unknown target: ");
+//         instr_disassemble(dr_get_current_drcontext(), instr, STDOUT);
+//         dr_fprintf(STDOUT, ", targ addr=%p\n", addr);
+// #endif
+//         return false;
+//     }
+//     sym.struct_size = sizeof(sym);
+//     sym.name = name;
+//     sym.name_size = MAXIMUM_SYMNAME;
+//     sym.file = file;
+//     sym.file_size = MAXIMUM_PATH;
+//     symres = drsym_lookup_address(data->full_path, addr - data->start, &sym,
+//                                 DRSYM_DEFAULT_FLAGS);
+//     if (symres == DRSYM_SUCCESS || symres == DRSYM_ERROR_LINE_NOT_AVAILABLE) {
+//         return true;
+//     }
+// #ifdef DEBUG_TRIVIALSPY
+//     dr_fprintf(STDOUT, "drsym_lookup_address failed: Unknown target: ");
+//     instr_disassemble(dr_get_current_drcontext(), instr, STDOUT);
+//     dr_fprintf(STDOUT, ", targ addr=%p\n", addr);
+//     dr_fprintf(STDOUT, "data->full_path=%s, start=%p, addr=%p, error=%d(%s)\n", data->full_path, data->start, addr, symres,
+//         symres==DRSYM_ERROR_LOAD_FAILED?"DRSYM_ERROR_LOAD_FAILED":(symres==DRSYM_ERROR_SYMBOL_NOT_FOUND?"DRSYM_ERROR_SYMBOL_NOT_FOUND":symres==DRSYM_ERROR_RECURSIVE?"DRSYM_ERROR_RECURSIVE":"OTHER"));
+// #endif
+//     return false;
+// }
+
+class TrivialFuncTable {
+    public:
+    #include "trivial_func_table_impl.h"
+    static void fini() {
+        for(auto it=trivial_func_table.begin(); it!=trivial_func_table.end(); ++it) {
+            int n_in = it->second.reg_in.size();
+            for(int i=0; i<n_in; ++i) {
+                delete[] it->second.condlist[i];
+            }
+            delete[] it->second.condlist;
+        }
+        trivial_func_table.clear();
+    }
+//     static int getTrivialFuncTableEntry(instr_t* instr) {
+//         if(!instr_is_call(instr)) {
+//             return -1;
+//         }
+//         opnd_t targ = instr_get_target(instr);
+//         app_pc addr = 0;
+//         if(opnd_is_pc(targ)) {
+//             addr = opnd_get_pc(targ);
+//         } else if(opnd_is_instr(targ)) {
+//             addr = instr_get_app_pc(opnd_get_instr(targ));
+//         } else {
+// #ifdef DEBUG_TRIVIALSPY
+//             dr_fprintf(STDOUT, "Unknown target: ");
+//             instr_disassemble(dr_get_current_drcontext(), instr, STDOUT);
+//             dr_fprintf(STDOUT, ", targ=");
+//             opnd_disassemble(dr_get_current_drcontext(), targ, STDOUT);
+//             dr_fprintf(STDOUT, "\n");
+// #endif
+//             return -1;
+//         }
+//         char name[MAXIMUM_SYMNAME];
+//         if(getTargetFuncName(instr, addr, name)) {
+//             return lookup(name);
+//         }
+//         return -1;
+//     }
+    static bool getTrivialConditionList(int entry, ConditionList_t*** condlist) {
+        auto it = trivial_func_table.find(entry);
+        if(it!=trivial_func_table.end()) {
+            *condlist = it->second.condlist;
+            return true;
+        }
+        return false;
+    }
+    // return UNKNOWN when not found
+    static ResultVal_t getTrivialResultForCondition(int entry, int trivial_operand, ConditionVal_t val, int8_t* other_idx) {
+        assert(trivial_operand>=0);
+        assert((size_t)trivial_operand<trivial_func_table[entry].reg_in.size());
+        ConditionList_t* condlist = trivial_func_table[entry].condlist[trivial_operand];
+        for(size_t j=0; j<condlist->second.size(); ++j) {
+            if(condlist->second[j].val==val) {
+                *other_idx = condlist->second[j].other_idx;
+                return condlist->second[j].res;
+            }
+        }
+        return UNKNOWN;
+    }
+
+    static int getAbsorbingResult(int entry) {
+        int res = 0;
+        int n_in = trivial_func_table[entry].reg_in.size();
+        for(int i=0; i<n_in; ++i) {
+            ConditionList_t* condlist = trivial_func_table[entry].condlist[i];
+            for(size_t j=0; j<condlist->second.size(); ++j) {
+                SET(res, condlist->second[j].res);
+                DPRINTF("SET result: %d (%d is set)\n", res, condlist->second[j].res);
+            }
+        }
+        return res;
+    }
+
+    static Condition_t* getConditionWithVal(int entry, int trivial_operand, ConditionVal_t val) {
+        assert(trivial_operand>=0);
+        assert((size_t)trivial_operand<trivial_func_table[entry].reg_in.size());
+        ConditionList_t* condlist = trivial_func_table[entry].condlist[trivial_operand];
+        for(size_t j=0; j<condlist->second.size(); ++j) {
+            if(condlist->second[j].val==val) {
+                return &condlist->second[j];
+            }
+        }
+        return NULL;
+    }
+    static reg_id_t getReturnRegister(int entry) {
+        auto it = trivial_func_table.find(entry);
+        if(it!=trivial_func_table.end()) {
+            return it->second.reg_out;
+        }
+        assert(0 && "Target Function Entry not found!\n");
+        return DR_REG_INVALID;
+    }
+    static std::vector<reg_id_t>& getInputRegisterList(int entry) {
+        auto it = trivial_func_table.find(entry);
+        if(it!=trivial_func_table.end()) {
+            return it->second.reg_in;
+        }
+        assert(0 && "Target Function Entry not found!\n");
+    }
+};
+
 struct TrivialOpTable {
     static void initTrivialOpTable() {
         #include "trivial_op_table_impl.h"
@@ -176,7 +332,7 @@ struct TrivialOpTable {
                 }
             }
         }
-#ifdef DEBUG
+#ifdef DEBUG_WARN_COST
         if(it != trivial_op_table.end()) {
             dr_fprintf(STDERR, "Warning: no cost found for opcode: %d (%s) with size=%d\n", opcode, trivial_op_str_table[opcode].c_str(), size);
         } else {
@@ -337,6 +493,11 @@ struct TrivialOpTable {
     }
     // return UNKNOWN when not found
     static ResultVal_t getTrivialResultForCondition(instr_t* instr, int trivial_operand, ConditionVal_t val, int8_t* other_idx) {
+        // int func_entry;
+        // if((func_entry=TrivialFuncTable::getTrivialFuncTableEntry(instr))!=-1) {
+        //     // this operation is a pre-defined trivial function entry, so bypass to the trivial func table
+        //     return TrivialFuncTable::getTrivialResultForCondition(func_entry, trivial_operand, val, other_idx);
+        // }
         ConditionList_t* condlist;
         if(getTrivialConditionList(instr, trivial_operand, &condlist)) {
             for(size_t j=0; j<condlist->second.size(); ++j) {
@@ -350,6 +511,11 @@ struct TrivialOpTable {
     }
 
     static int getAbsorbingResult(instr_t* instr) {
+        // int func_entry;
+        // if((func_entry=TrivialFuncTable::getTrivialFuncTableEntry(instr))!=-1) {
+        //     // this operation is a pre-defined trivial function entry, so bypass to the trivial func table
+        //     return TrivialFuncTable::getAbsorbingResult(func_entry);
+        // }
         int res = 0;
         ConditionList_t* condlist;
         for(int i=0; i<instr_num_srcs(instr); ++i) {
@@ -364,6 +530,11 @@ struct TrivialOpTable {
     }
 
     static Condition_t* getConditionWithVal(instr_t* instr, int trivial_operand, ConditionVal_t val) {
+        // int func_entry;
+        // if((func_entry=TrivialFuncTable::getTrivialFuncTableEntry(instr))!=-1) {
+        //     // this operation is a pre-defined trivial function entry, so bypass to the trivial func table
+        //     return TrivialFuncTable::getConditionWithVal(func_entry, trivial_operand, val);
+        // }
         ConditionList_t* condlist;
         if(getTrivialConditionList(instr, trivial_operand, &condlist)) {
             for(size_t j=0; j<condlist->second.size(); ++j) {
@@ -374,129 +545,49 @@ struct TrivialOpTable {
         }
         return NULL;
     }
-
-    static bool isAbsorbing(instr_t* instr, int trivial_operand, ConditionVal_t val) {
-        ConditionList_t* condlist;
-        if(getTrivialConditionList(instr, trivial_operand, &condlist)) {
-            for(size_t j=0; j<condlist->second.size(); ++j) {
-                if(condlist->second[j].val==val) {
-                    return condlist->second[j].attr == Absorbing;
-                }
-            }
-        }
-        return false;
-    }
-
-    static bool isIdentical(instr_t* instr, int trivial_operand, ConditionVal_t val) {
-        ConditionList_t* condlist;
-        if(getTrivialConditionList(instr, trivial_operand, &condlist)) {
-            for(size_t j=0; j<condlist->second.size(); ++j) {
-                if(condlist->second[j].val==val) {
-                    return condlist->second[j].attr == Identical;
-                }
-            }
-        }
-        return false;
-    }
-
-    // return encoded check attr info
-    static int8_t getEncodedTrivialCondAttrFromList(ConditionList_t* condlist, ConditionVal_t val) {
-        int8_t check = 0;
-        for(size_t j=0; j<condlist->second.size(); ++j) {
-            if(condlist->second[j].val==val) {
-                if(condlist->second[j].attr==Attribute_t::Absorbing) {
-                    check = COND_CHECK_ATTR_ABSORBING;
-                } else if(condlist->second[j].attr==Attribute_t::Identical) {
-                    check = COND_CHECK_ATTR_IDENTICAL;
-                } else {
-                    // the condition with never attribute will not be checked
-                }
-                break;
-            }
-        }
-        return check;
-    }
 };
 
-#if 0
-/********************************************************************
- * TrivialFuncTable is generated from pre-defined lists of functions
- * with trivial conditions and corresponding attributes and results.
- * Pre-defined function table format:
- *      begin <func name> : 
- *          <arg no.>; <type> <condition>; <attribute>; <type> <result>;
- *          ...
- *      end
- * Where:
- *      <func name> is the trivial function name,
- *      <arg no.> is the number of input argument of the function,
- *      <type> is the type of the argument/result, which is one of:
- *             double, float, int8, int16, int32, int64, etc.
- *      <condition> is the trivial condition, which is one of
- *             IS_ZERO, IS_FULL, IS_ONE
- *      <attribute> is the attribute of this trivial condition, 
- *          which is one of:
- *             FP_UNSAFE, ABSORBING, IDENTITY, MEMREF, etc.
- *          Note that attribute FUNCTION is automatically added;
- *      <result> is the final result of this function when this 
- *          trivial condition is satisfied, which is one of:
- *              ZERO, ONE, FULL, OTHER, etc.
- *          Note that if result is not set to OTHER, it will enable 
- *          function skipping when trivial condition is satisfied, 
- *          and the pre-defined results are returned, which will 
- *          result in better profiling performance.
- * Table content is the function callback before the wrapped function
- * which is generated from the information in pre-defined function 
- * table.
- * ******************************************************************/
-typedef void(*pre_func_cb_t)(void *, void **);
-// Note: the list is passed to the call back as *user_data by using drwrap_wrap_ex() if it contains more than one call back
-typedef uint32_t func_id_t;
+/**********************************************************************************/
+// May be better quantized by benchmarking the cycle costs of each math function
+#define MATH_FUNC_COST_BOOST 5000
+#define MEMORY_COST_BOOST 50
 
-struct func_info_t {
-    std::string func_name;
-    int arg;
-    pre_func_cb_t pre_cb;
-    AttributeTable_t atb;
-    bool isApprox;
-};
+int32_t estimate_cost(instr_t* instr) {
+    int cost; //, func_entry;
+    // if((func_entry=TrivialFuncTable::getTrivialFuncTableEntry(instr))!=-1) {
+    //     cost = MATH_FUNC_COST_BOOST;
+    // } else {
+    {
+        int opcode = instr_get_opcode(instr);
+        int i = 1, num_srcs = instr_num_srcs(instr);
+        if(num_srcs>0) {
+            int size = opnd_size_in_bytes(opnd_get_size(instr_get_src(instr, 0)));
+            while(size==0 && i<num_srcs) {
+                size = opnd_size_in_bytes(opnd_get_size(instr_get_src(instr, i)));
+                ++i;
+            }
+            cost = TrivialOpTable::getCost(opcode, size);
+        } else {
+            cost = 1;
+        }
+    }
 
-typedef std::vector<func_info_t*> func_info_list_t;
-typedef std::unordered_map<std::string, func_info_list_t*> trivial_func_table_t;
+    int mem_count = 0;
+    int num_srcs = instr_num_srcs(instr);
+    for(int i=0; i<num_srcs; ++i) {
+        if(opnd_is_memory_reference(instr_get_src(instr, i))) {
+            ++mem_count;
+        }
+    }
+    int num_dsts = instr_num_dsts(instr);
+    for(int i=0; i<num_dsts; ++i) {
+        if(opnd_is_memory_reference(instr_get_dst(instr, i))) {
+            ++mem_count;
+        }
+    }
 
-#define MAX_FUNC_ID 1024
-func_id_t cur_func_id = 0;
-func_info_t preallocated_func_info[MAX_FUNC_ID];
-
-func_id_t get_func_id(std::string func_name, int arg, pre_func_cb_t callback, AttributeTable_t atb, bool isApprox) {
-    assert(cur_func_id < MAX_FUNC_ID);
-    preallocated_func_info[cur_func_id].func_name   = func_name;
-    preallocated_func_info[cur_func_id].arg         = arg;
-    preallocated_func_info[cur_func_id].pre_cb      = callback;
-    preallocated_func_info[cur_func_id].atb         = atb;
-    preallocated_func_info[cur_func_id].isApprox    = isApprox;
-    return cur_func_id++;
+    cost += mem_count*MEMORY_COST_BOOST;
+    return cost;
 }
-
-func_info_t& get_func_info(func_id_t func_id) {
-    return preallocated_func_info[func_id];
-}
-
-struct funcPreCBData {
-    int arg;
-    func_id_t func_id;
-};
-
-struct TrivialFuncTable{
-    static void initFuncTable(const char* extFuncTable);
-    static void finiFuncTable();
-    // get trivial condition of function <target>, not used
-    static int get(instr_t* instr, func_info_list_t &func_info_list);
-    // checker
-    static bool isTrivial(instr_t* instr, uint64_t filter);
-    static bool isApproxTrivial(instr_t* instr, uint64_t filter);
-    static int trivialCounts(instr_t* instr, uint64_t filter, uint& trivial, uint& approxTrivial);
-};
-#endif
 
 #endif

@@ -3020,18 +3020,20 @@ drcctlib_get_context_handle_in_reg(void *drcontext, instrlist_t *ilist, instr_t 
     MINSERT(ilist, where,
             XINST_CREATE_load(drcontext, opnd_create_reg(store_reg),
                               OPND_CREATE_CTXT_HNDL_MEM(addr_reg, 0)));
+    if(slot!=0) {
 #ifdef ARM_CCTLIB
-    MINSERT(ilist, where,
-            XINST_CREATE_load_int(drcontext, opnd_create_reg(addr_reg),
-                                  OPND_CREATE_SLOT(slot)));
-    MINSERT(ilist, where,
-            XINST_CREATE_add(drcontext, opnd_create_reg(store_reg),
-                             opnd_create_reg(addr_reg)));
+        MINSERT(ilist, where,
+                XINST_CREATE_load_int(drcontext, opnd_create_reg(addr_reg),
+                                    OPND_CREATE_SLOT(slot)));
+        MINSERT(ilist, where,
+                XINST_CREATE_add(drcontext, opnd_create_reg(store_reg),
+                                opnd_create_reg(addr_reg)));
 #else
-    MINSERT(
-        ilist, where,
-        XINST_CREATE_add(drcontext, opnd_create_reg(store_reg), OPND_CREATE_SLOT(slot)));
+        MINSERT(
+            ilist, where,
+            XINST_CREATE_add(drcontext, opnd_create_reg(store_reg), OPND_CREATE_SLOT(slot)));
 #endif
+    }
 }
 
 DR_EXPORT
@@ -3231,7 +3233,9 @@ drcctlib_get_ctxt_hndl_pc(context_handle_t ctxt_hndl)
     }
     cct_bb_node_t *bb_node = ctxt_hndl_parent_bb_node(ctxt_hndl);
     if (bb_node->key == THREAD_ROOT_BB_SHARED_BB_KEY) {
+#ifdef DEBUG
         DRCCTLIB_PRINTF("drcctlib_get_ctxt_hndl_pc: THREAD_ROOT_BB_SHARED_BB_KEY");
+#endif
         return 0;
     }
     slot_t slot = ctxt_hndl - bb_node->child_ctxt_start_idx;

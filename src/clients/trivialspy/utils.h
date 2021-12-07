@@ -32,6 +32,47 @@ bool instr_is_reg_copy(instr_t* instr) {
     return false;
 }
 
+bool instr_is_copy(instr_t* instr) {
+    if(instr_is_mov(instr)) return true;
+    int opcode = instr_get_opcode(instr);
+    switch(opcode) {
+        case OP_movdqu:
+        case OP_movdqa:
+        case OP_movsd:
+        case OP_movss:
+        case OP_vmovss:
+        case OP_vmovsd:
+        case OP_vmovd:
+        case OP_vmovq:
+        case OP_movd:
+        case OP_movq:
+        case OP_movapd:
+        case OP_movaps:
+        case OP_vmovapd:
+        case OP_vmovaps:
+        case OP_movupd:
+        case OP_movups:
+        case OP_vmovupd:
+        case OP_vmovups:
+            return true;
+    }
+    return false;
+}
+
+bool instr_is_convert(instr_t* instr) {
+    int opcode = instr_get_opcode(instr);
+    switch(opcode) {
+        case OP_cvtsi2sd:
+        case OP_cvtsi2ss:
+        case OP_cvtpi2ps:
+        case OP_cvtpi2pd:
+        case OP_cvttsd2si:
+        case OP_cvttss2si:
+            return true;
+    }
+    return false;
+}
+
 // TODO: search for dynamorio interface to obtain element witdh of a SIMD operation
 // As the dynamorio did not provide function to obtain SIMD operation width of each element, Zerospy mannually implements with a lookup table
 #ifdef ARM_CCTLIB

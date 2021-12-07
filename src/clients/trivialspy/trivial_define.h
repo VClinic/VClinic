@@ -11,7 +11,7 @@
 // #define DEBUG_TRIVIAL
 // #define DEBUG_COMBINED
 
-#ifdef DEBUG_TRIVIAL
+#ifdef DEBUG_TRIVIALSPY
 #define DPRINTF(args...) dr_fprintf(STDOUT, args)
 #define IF_DEBUG_TRIVIAL(stat...) stat
 #else
@@ -44,14 +44,16 @@
     TRIVIALSPY_CLIENT_EXIT_PROCESS_TEMPLATE("trivialspy", format, \
                                           ##args)
 
+
 #define TLS_SLOT(tls_base, offs) (void **)((byte *)(tls_base) + (offs))
 #define BUF_PTR(tls_base, offs) *(byte **)TLS_SLOT(tls_base, offs)
 
 #define MINSERT instrlist_meta_preinsert
 
-// use manual inlined updates
-#define RESERVE_AFLAGS(dc, bb, ins) assert(drreg_reserve_aflags (dc, bb, ins)==DRREG_SUCCESS)
-#define UNRESERVE_AFLAGS(dc, bb, ins) assert(drreg_unreserve_aflags (dc, bb, ins)==DRREG_SUCCESS)
+#ifdef RESERVE_REG
+#undef RESERVE_REG
+#undef UNRESERVE_REG
+#endif
 
 #define RESERVE_REG(dc, bb, instr, vec, reg) do {\
     if (drreg_reserve_register(dc, bb, instr, vec, &reg) != DRREG_SUCCESS) { \

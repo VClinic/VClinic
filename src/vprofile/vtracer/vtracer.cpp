@@ -358,7 +358,6 @@ static void insert_buf_check(void *drcontext, instrlist_t *bb, instr_t *ins, ush
             } else
 #endif
             MINSERT(bb, ins, XINST_CREATE_sub(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(buf->buf_size)));
-
             // get current buffer end
             vtracer_insert_load_buf_ptr(drcontext, buf, bb, ins, reg_end);
             // insert cleancall for updating the buffered trace
