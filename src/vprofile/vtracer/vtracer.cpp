@@ -1099,19 +1099,19 @@ void insert_trace_value_in_simd(void *drcontext, instrlist_t *ilist, instr_t *wh
           break;
         case 8:
             MINSERT(ilist, where,
-                  INSTR_CREATE_st1_multi_1(drcontext,
+                  INSTR_CREATE_str_imm(drcontext,
                                           opnd_create_base_disp_aarch64(reg_ptr,
                                                                 DR_REG_NULL, (dr_extend_type_t) i,
                                                                 false, offset, (dr_opnd_flags_t) i, OPSZ_8),
-                                          opnd_create_reg(reg_simd), OPND_CREATE_BYTE()));
+                                          opnd_create_reg(reg_simd), opnd_create_reg(reg_ptr), OPND_CREATE_INT(offset)));
             break;
         case 16:
             MINSERT(ilist, where,
-                  INSTR_CREATE_st1_multi_1(drcontext,
+                  INSTR_CREATE_str_imm(drcontext,
                                           opnd_create_base_disp_aarch64(reg_ptr,
                                                                 DR_REG_NULL, (dr_extend_type_t) i,
                                                                 false, offset, (dr_opnd_flags_t) i, OPSZ_16),
-                                          opnd_create_reg(reg_simd), OPND_CREATE_BYTE()));
+                                          opnd_create_reg(reg_simd), opnd_create_reg(reg_ptr), OPND_CREATE_INT(offset)));
             break;
         case 32:
             MINSERT(ilist, where,

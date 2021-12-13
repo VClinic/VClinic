@@ -98,6 +98,12 @@ using namespace std;
 #endif
 
 // We only interest in memory loads
+bool 
+VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
+    uint32_t user_mask = ANY_DATA_TYPE | MEMORY | READ | BEFORE;
+    return ((user_mask & opmask) == opmask);
+}
+
 bool
 zerospy_filter_read_mem_access_instr(instr_t *instr)
 {
@@ -774,60 +780,6 @@ string getFpRedMapString(uint64_t redmap, uint64_t accessLen) {
 #define getFpRedMapString_DP(redmap, num) getFpRedMapString<2,7>(redmap, num*10)
 /*******************************************************************************************/
 
-#    ifdef ARM_CCTLIB
-#        define DRCCTLIB_LOAD_IMM32_0(dc, Rt, imm) \
-            INSTR_CREATE_movz((dc), (Rt), (imm), OPND_CREATE_INT(0))
-#        define DRCCTLIB_LOAD_IMM32_16(dc, Rt, imm) \
-            INSTR_CREATE_movk((dc), (Rt), (imm), OPND_CREATE_INT(16))
-#        define DRCCTLIB_LOAD_IMM32_32(dc, Rt, imm) \
-            INSTR_CREATE_movk((dc), (Rt), (imm), OPND_CREATE_INT(32))
-#        define DRCCTLIB_LOAD_IMM32_48(dc, Rt, imm) \
-            INSTR_CREATE_movk((dc), (Rt), (imm), OPND_CREATE_INT(48))
-static inline void
-minstr_load_wint_to_reg(void *drcontext, instrlist_t *ilist, instr_t *where, reg_id_t reg,
-                        int32_t wint_num)
-{
-    MINSERT(ilist, where,
-            DRCCTLIB_LOAD_IMM32_0(drcontext, opnd_create_reg(reg),
-                                  OPND_CREATE_IMMEDIATE_INT(wint_num & 0xffff)));
-    wint_num = (wint_num >> 16) & 0xffff;
-    if(wint_num) {
-        MINSERT(ilist, where,
-                DRCCTLIB_LOAD_IMM32_16(drcontext, opnd_create_reg(reg),
-                                    OPND_CREATE_IMMEDIATE_INT(wint_num)));
-    }
-}
-
-#ifdef ARM64_CCTLIB
-static inline void
-minstr_load_wwint_to_reg(void *drcontext, instrlist_t *ilist, instr_t *where,
-                         reg_id_t reg, uint64_t wwint_num)
-{
-    MINSERT(ilist, where,
-            DRCCTLIB_LOAD_IMM32_0(drcontext, opnd_create_reg(reg),
-                                  OPND_CREATE_IMMEDIATE_INT(wwint_num & 0xffff)));
-    uint64_t tmp = (wwint_num >> 16) & 0xffff;
-    if(tmp) {
-        MINSERT(ilist, where,
-            DRCCTLIB_LOAD_IMM32_16(drcontext, opnd_create_reg(reg),
-                                OPND_CREATE_IMMEDIATE_INT(tmp)));
-    }
-    tmp = (wwint_num >> 32) & 0xffff;
-    if(tmp) {
-        MINSERT(ilist, where,
-            DRCCTLIB_LOAD_IMM32_32(drcontext, opnd_create_reg(reg),
-                                OPND_CREATE_IMMEDIATE_INT(tmp)));
-    }
-    tmp = (wwint_num >> 48) & 0xffff;
-    if(tmp) {
-        MINSERT(ilist, where,
-            DRCCTLIB_LOAD_IMM32_48(drcontext, opnd_create_reg(reg),
-                                OPND_CREATE_IMMEDIATE_INT(tmp)));
-    }
-}
-#endif
-#    endif
-
 template<int size, int esize, bool is_float>
 void trace_update_cb(val_info_t *info) {
     per_thread_t* pt = (per_thread_t *)drmgr_get_tls_field(dr_get_current_drcontext(), tls_idx);
@@ -1443,29 +1395,29 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
 
     // Tracing Buffer
     // Integer 1 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, INT8, trace_update_cb<1,1,false>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT8, trace_update_cb<1,1,false>);
     // Integer 2 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, INT16, trace_update_cb<2,2,false>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT16, trace_update_cb<2,2,false>);
     // Integer 4 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, INT32, trace_update_cb<4,4,false>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT32, trace_update_cb<4,4,false>);
     // Integer 8 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, INT64, trace_update_cb<8,8,false>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT64, trace_update_cb<8,8,false>);
     // Integer 16 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, INT128, trace_update_cb<16,16,false>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT128, trace_update_cb<16,16,false>);
     // Integer 32 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, INT256, trace_update_cb<32,32,false>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT256, trace_update_cb<32,32,false>);
     // Floating Point Single
-    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, SPx1, trace_update_cb<4,4,true>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, SPx1, trace_update_cb<4,4,true>);
     // Floating Point Double
-    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, DPx1, trace_update_cb<8,8,true>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, DPx1, trace_update_cb<8,8,true>);
     // Floating Point 4*Single
-    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, SPx4, trace_update_cb<16,4,true>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, SPx4, trace_update_cb<16,4,true>);
     // Floating Point 2*Double
-    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, DPx2, trace_update_cb<16,8,true>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, DPx2, trace_update_cb<16,8,true>);
     // Floating Point 8*Single
-    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, SPx8, trace_update_cb<32,4,true>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, SPx8, trace_update_cb<32,4,true>);
     // Floating Point 4*Double
-    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, DPx4, trace_update_cb<32,8,true>);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, DPx4, trace_update_cb<32,8,true>);
 }
 
 #ifdef __cplusplus

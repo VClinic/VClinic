@@ -288,9 +288,11 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
         return 8;
         //return 16;
 
-    case OP_vmovss:
+    case OP_movss:
     case OP_movups:
     case OP_movaps:
+
+    case OP_vmovss:
     case OP_vmovups:
     case OP_vmovlps:
     case OP_vmovsldup:
@@ -312,7 +314,10 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
     case OP_vshufps:
         return 4;
 
+    case OP_movsd:
     case OP_andpd:
+    case OP_shufpd:
+    case OP_xorpd:
     case OP_vmovsd:
     case OP_vmovupd:
     case OP_vmovlpd:
@@ -358,6 +363,8 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
         return 8;
 
     /* AVX */
+    case OP_xorps:
+
     case OP_vucomiss:
     case OP_vcomiss:
     case OP_vmovmskps:
@@ -518,24 +525,48 @@ IntegerOperandSizeTable(instr_t *instr, opnd_t opnd)
 
     int opc = instr_get_opcode(instr);
 
-    if(opc == OP_vmovdqu || opc == OP_vmovdqa) {
-        return size;
-    }
-
     switch (opc) {
-        case OP_pmovmskb:
+        case OP_vpbroadcastb:
         case OP_vpcmpeqb:
+
+        case OP_pmovmskb:
         case OP_pcmpeqb:
-        case OP_pxor:
 	    case OP_paddb:
         case OP_psubb:
             return 1;
+
+        case OP_punpcklwd:
+        case OP_punpcklbw:
+            return 2;
+
+
+        case OP_vmovd:
+
+        case OP_movd:
+        case OP_punpckldq:
+        case OP_pshufd:
+            return 4;
+
+        case OP_vmovq:
+
+        case OP_pxor:
+        case OP_por:
+        case OP_movq:
         case OP_punpcklqdq:
         case OP_paddq:
             return 8;
+
+        case OP_pslldq:
+        case OP_psrldq:
         case OP_movdqa:
         case OP_movdqu:
             return 16;
+
+        case OP_vmovdqu:
+        case OP_vmovdqa:
+        case OP_vpor:
+        case OP_vpxor:
+            return size;
         default: {
             return 0;
         }

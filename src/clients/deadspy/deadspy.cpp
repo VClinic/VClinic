@@ -139,6 +139,12 @@ static droption_t<bool> KnobTopN
     DRCCTLIB_CLIENT_EXIT_PROCESS_TEMPLATE("deadspy", format, \
                                           ##args)
 
+bool 
+VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
+    uint32_t user_mask = (ANY_DATA_TYPE | MEMORY | READ | BEFORE | WRITE | AFTER);
+    return ((user_mask & opmask) == opmask);
+}
+
 bool
 DEADSPY_FILTER_MEM_ACCESS_INSTR(instr_t *instr) {
     if(!VPROFILE_FILTER_MEM_ACCESS_INSTR(instr)) return false;
@@ -154,6 +160,7 @@ DEADSPY_FILTER_MEM_ACCESS_INSTR(instr_t *instr) {
         default: return true;
     }
 #endif
+    return true;
 }
 
 inline bool DeadInfoComparer(const DeadInfo& first, const DeadInfo& second);
@@ -342,8 +349,8 @@ static void
 ClientThreadEnd(void *drcontext)
 {
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
-    dr_fprintf(gTraceFile, "\nThread %d ThreadTotalBytesWrite = %" PRIu64, pt->threadId, pt->totalBytesWrite);
-    dr_fprintf(pt->output_file, "\nThreadTotalBytesWrite = %" PRIu64, pt->totalBytesWrite);
+    dr_fprintf(gTraceFile, "Thread %d ThreadTotalBytesWrite = %u\n", pt->threadId, pt->totalBytesWrite);
+    dr_fprintf(pt->output_file, "ThreadTotalBytesWrite = %u\n", pt->totalBytesWrite);
     __sync_fetch_and_add(&grandTotBytesWrites,pt->totalBytesWrite);
 
     unordered_map<uint64_t, uint64_t>::iterator mapIt = (*pt->DeadMap).begin();
@@ -588,7 +595,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     uint32_t opnd_mask = (ANY_DATA_TYPE | MEMORY | READ | BEFORE | WRITE | AFTER);
 
     // Tracing Buffer
-    vprofile_register_trace_cb(vtrace, VPROFILE_DEFAULT_OPND_FILTER, opnd_mask, ANY, trace_update_cb);
+    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, ANY, trace_update_cb);
 }
 
 #ifdef __cplusplus
