@@ -147,7 +147,7 @@ VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
 
 bool
 DEADSPY_FILTER_MEM_ACCESS_INSTR(instr_t *instr) {
-    if(!VPROFILE_FILTER_MEM_ACCESS_INSTR(instr)) return false;
+    if(!VPROFILE_FILTER_MEM_ACCESS_INSTR(instr) || instr_is_prefetch(instr)) return false;
 #ifdef X86
     if(instr_is_xsave(instr)) {
         return false;

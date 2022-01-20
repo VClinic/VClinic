@@ -42,6 +42,18 @@ use_DynamoRIO_extension(drcctlib drsyms)
 use_DynamoRIO_extension(drcctlib drwrap)
 use_DynamoRIO_extension(drcctlib drreg)
 
+# DRCCTLib version with data address info logged
+add_library(drcctlib_with_addr SHARED ${srcs})
+configure_extension(drcctlib_with_addr OFF)
+use_DynamoRIO_extension(drcctlib_with_addr drcontainers)
+use_DynamoRIO_extension(drcctlib_with_addr drmgr)
+use_DynamoRIO_extension(drcctlib_with_addr drutil)
+use_DynamoRIO_extension(drcctlib_with_addr drsyms)
+use_DynamoRIO_extension(drcctlib_with_addr drwrap)
+use_DynamoRIO_extension(drcctlib_with_addr drreg)
+target_compile_options(drcctlib_with_addr PRIVATE "-DDRCCTLIB_USE_ADDR")
+
+
 add_library(drcctlib_static STATIC ${srcs_static})
 configure_extension(drcctlib_static ON)
 use_DynamoRIO_extension(drcctlib_static drcontainers)
@@ -50,6 +62,17 @@ use_DynamoRIO_extension(drcctlib_static drutil_static)
 use_DynamoRIO_extension(drcctlib_static drsyms_static)
 use_DynamoRIO_extension(drcctlib_static drwrap_static)
 use_DynamoRIO_extension(drcctlib_static drreg_static)
+
+# DRCCTLib version with data address info logged
+add_library(drcctlib_with_addr_static STATIC ${srcs_static})
+configure_extension(drcctlib_with_addr_static ON)
+use_DynamoRIO_extension(drcctlib_with_addr_static drcontainers)
+use_DynamoRIO_extension(drcctlib_with_addr_static drmgr_static)
+use_DynamoRIO_extension(drcctlib_with_addr_static drutil_static)
+use_DynamoRIO_extension(drcctlib_with_addr_static drsyms_static)
+use_DynamoRIO_extension(drcctlib_with_addr_static drwrap_static)
+use_DynamoRIO_extension(drcctlib_with_addr_static drreg_static)
+target_compile_options(drcctlib_with_addr_static PRIVATE "-DDRCCTLIB_USE_ADDR")
 
 install_ext_header(drcctlib_defines.h)
 install_ext_header(drcctlib_utils.h)

@@ -107,7 +107,7 @@ VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
 bool
 zerospy_filter_read_mem_access_instr(instr_t *instr)
 {
-    return instr_reads_memory(instr) && !instr_is_prefetch(instr) && !instr_is_gather(instr) && !instr_is_scatter(instr);
+    return instr_reads_memory(instr) && !instr_is_prefetch(instr);
 }
 
 #define ZEROSPY_FILTER_READ_MEM_ACCESS_INSTR zerospy_filter_read_mem_access_instr

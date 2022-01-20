@@ -53,12 +53,22 @@ using namespace std;
 #define MAX_WRITE_OPS_IN_INS (8)
 #define MAX_REG_LENGTH (64)
 
-#define MAX_SIMD_LENGTH (64)
+#ifdef X86
+    #define MAX_SIMD_LENGTH (64)
+#else
+    #define MAX_SIMD_LENGTH (16) //Q0-Q31 128bits
+#endif
 #define MAX_SIMD_REGS (32)
 
 #define MAX_ALIAS_REGS (16)  //EAX, EBX, ECX, EDX, EBP, EDI, ESI, ESP, R8-R15
 #define MAX_ALIAS_REG_SIZE (8) //RAX is 64bits
 #define MAX_ALIAS_TYPE (3) //(RAX, EAX, AX),(AH),(AL)
+
+#ifdef AARCH64
+    // 64 BIT: X0-X30 XSP XZR
+    // 32 BIT: W0-W30 WSP WZR
+    #define MAX_GENERAL_REGS (33)
+#endif
 
 #ifdef X86
 //different register group
@@ -156,8 +166,9 @@ static droption_t<int> op_window_enable
 // We only interest in memory stores
 bool 
 VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
-    uint32_t user_mask = (ANY_DATA_TYPE | GPR_REGISTER | SIMD_REGISTER | MEMORY | WRITE | BEFORE | AFTER);
-    return ((user_mask & opmask) == opmask);
+    uint32_t mask1 = (ANY_DATA_TYPE | GPR_REGISTER | SIMD_REGISTER | WRITE | AFTER);
+    uint32_t mask2 = (ANY_DATA_TYPE | MEMORY | WRITE | BEFORE | AFTER);
+    return ((mask1 & opmask) == opmask) || ((mask2 &opmask) == opmask);
 }
 
 bool REDSPY_FILTER_MEM_ACCESS_INSTR(instr_t *instr) {
@@ -204,14 +215,18 @@ typedef struct _per_thread_t {
     AddrValPair buffer[MAX_WRITE_OPS_IN_INS];
 
     struct LargeReg simdValue[MAX_SIMD_REGS];
-    
+    uint32_t simdCtxt[MAX_SIMD_REGS];
+
+#ifdef X86
     uint32_t regCtxt[DR_REG_LAST_ENUM];
     uint8_t regValue[DR_REG_LAST_ENUM][MAX_REG_LENGTH];
-#ifdef X86
+
     uint8_t aliasValue[MAX_ALIAS_REGS][MAX_ALIAS_REG_SIZE];
     uint32_t aliasCtxt[MAX_ALIAS_REGS][MAX_ALIAS_TYPE];
+#else
+    uint32_t regCtxt[MAX_GENERAL_REGS];
+    uint8_t regValue[MAX_GENERAL_REGS][MAX_REG_LENGTH];
 #endif
-    uint32_t simdCtxt[MAX_SIMD_REGS];
 
     unordered_map<uint64_t, uint64_t>* RedMap;
     unordered_map<uint64_t, uint64_t>* ApproxRedMap;
@@ -361,7 +376,7 @@ struct UnrolledSubLoop {
             T rate = (newValue - oldValue) / oldValue;
             isRed = (rate <= delta && rate >= -delta);
         } else {
-            isRed = (*((T *) (prev)) == *(static_cast<T *>(addr)));
+            isRed = (reinterpret_cast<const T *> (prev)[start] == reinterpret_cast<const T *> (addr)[start]);
         }
 
         return isRed &&
@@ -729,6 +744,56 @@ inline bool RegHasAlias(reg_id_t reg){
         default: return false;
     }
 }
+#else
+/****************  handleing general registers ****************/
+template<class T, uint8_t len>
+struct HandleGeneralRegisters{
+    static __attribute__((always_inline)) void CheckValues(T value, reg_id_t reg, context_handle_t curCtxtHandle, per_thread_t* pt) {
+        T * regBefore = (T *)(&pt->regValue[reg][0]);
+        
+        if (* regBefore == value ) {
+            AddToRedTable(MAKE_CONTEXT_PAIR(pt->regCtxt[reg],curCtxtHandle),sizeof(T),pt);
+        }else
+            * regBefore = value;
+        pt->regCtxt[reg] = curCtxtHandle;
+    }
+};
+
+// handleLargeRegisters
+
+/****************  handleing registers approximation  ****************/
+//approximate general registers
+template<class T>
+struct ApproxGeneralRegisters{
+    
+    static __attribute__((always_inline)) void CheckValues(uint8_t *val, reg_id_t reg, context_handle_t curCtxtHandle, per_thread_t *pt){
+        T newValue = *(T*)val;
+        
+        T oldValue = *((T*)(&pt->regValue[reg][0]));
+        T rate = (newValue - oldValue)/oldValue;
+        if(rate <= delta && rate >= -delta) {
+            AddToApproximateRedTable(MAKE_CONTEXT_PAIR(pt->regCtxt[reg],curCtxtHandle),sizeof(T),pt);
+        }
+        if(newValue != oldValue)
+            *((T*)(&pt->regValue[reg][0])) = newValue;
+        pt->regCtxt[reg] = curCtxtHandle;
+    }
+};
+
+//approximate SIMD registers, simdType:0(XMM), 1(YMM), 2(ZMM)
+template<class T, uint32_t AccessLen>
+struct ApproxLargeRegisters{
+    
+    static __attribute__((always_inline)) void CheckValues(uint8_t *val, reg_id_t regID, context_handle_t curCtxtHandle, per_thread_t *pt){
+        if(UnrolledSubLoop<0, AccessLen/sizeof(T), 1, T, true>::BodyISRed((void*)val, &(pt->simdValue[regID].value[0]))) {
+            AddToApproximateRedTable(MAKE_CONTEXT_PAIR(pt->simdCtxt[regID],curCtxtHandle),AccessLen,pt);
+        } else {
+            UnrolledCopy<0, AccessLen/sizeof(T), 1, T>::BodyCopy(val, &(pt->simdValue[regID].value[0]));
+        }
+
+        pt->simdCtxt[regID] = curCtxtHandle;
+    }
+};
 #endif
 
 /***************************************************************************************/
@@ -940,9 +1005,8 @@ void InstrumentReg(int size, int esize, bool is_float, void *addr, uint8_t* val,
         uint8_t regId = static_cast<uint8_t>(((aliasIDs)  & 0x00ffffff) >> 16 );
         if(is_float) {
             switch(size) {
-                case 1:
-                case 2:
-                    DR_ASSERT_MSG(false, "trace_update_cb: Unexptected small floating size.\n"); break;
+                case 1: DR_ASSERT_MSG(false, "trace_update_cb: Unexptected small floating size.\n"); break;
+                case 2: break;
                 case 4: ApproxGeneralRegisters<float, true>::CheckValues(val, regId, cct, pt); break;
                 case 8: ApproxGeneralRegisters<double, true>::CheckValues(val, regId, cct, pt); break;
                 default: break;
@@ -963,9 +1027,8 @@ void InstrumentReg(int size, int esize, bool is_float, void *addr, uint8_t* val,
     } else {
         if(is_float) {
             switch(size) {
-                case 1:
-                case 2:
-                    DR_ASSERT_MSG(false, "trace_update_cb: Unexptected small floating size.\n");
+                case 1: DR_ASSERT_MSG(false, "trace_update_cb: Unexptected small floating size.\n"); break;
+                case 2: break;
                 case 4: ApproxGeneralRegisters<float, false>::CheckValues(val, *reg, cct, pt); break;
                 case 8: ApproxGeneralRegisters<double, false>::CheckValues(val, *reg, cct, pt); break;
                 case 10: Check10BytesReg(val, *reg, cct, pt); break;
@@ -1005,6 +1068,53 @@ void InstrumentReg(int size, int esize, bool is_float, void *addr, uint8_t* val,
         }
     }
 }
+#else
+void InstrumentReg(int size, int esize, bool is_float, void *addr, uint8_t* val, uint32_t cct, per_thread_t *pt) {
+    reg_id_t *reg = (reg_id_t*) &addr;
+    bool is_gpr = reg_is_gpr(*reg);
+    if(is_gpr) {
+        if(is_float) {
+            switch(size) {
+                case 4: ApproxGeneralRegisters<float>::CheckValues(val, *reg - DR_REG_W0, cct, pt); break;
+                case 8: ApproxGeneralRegisters<double>::CheckValues(val, *reg - DR_REG_X0, cct, pt); break;
+                default: DR_ASSERT_MSG(false, "trace_update_cb: not recoganized gp register size for floating instruction!\n"); break;
+            }
+        } else {
+            switch(size) {
+                case 4: HandleGeneralRegisters<uint32_t, 1>::CheckValues(*(uint32_t*)val, *reg - DR_REG_W0, cct, pt); break;
+                case 8: HandleGeneralRegisters<uint64_t, 1>::CheckValues(*(uint64_t*)val, *reg - DR_REG_X0, cct, pt); break;
+                default: DR_ASSERT_MSG(false, "trace_update_cb: not recoganized gp register size for integer instruction!\n"); break;
+            }
+        }
+    } else {
+        if(is_float) {
+            switch(size) {
+                case 1: ApproxGeneralRegisters<uint8_t>::CheckValues(val, *reg - DR_REG_B0, cct, pt); break;
+                case 2: ApproxGeneralRegisters<uint16_t>::CheckValues(val, *reg - DR_REG_H0, cct, pt); break;
+                case 4: ApproxGeneralRegisters<float>::CheckValues(val, *reg - DR_REG_S0, cct, pt); break;
+                case 8: ApproxGeneralRegisters<double>::CheckValues(val, *reg - DR_REG_D0, cct, pt); break;
+                // case 10: Check10BytesReg(val, *reg, cct, pt); break;
+                case 16: {
+                    switch(esize) {
+                        case 2: ApproxLargeRegisters<uint16_t, 16>::CheckValues(val, *reg - DR_REG_Q0, cct, pt); break;
+                        case 4: ApproxLargeRegisters<float, 16>::CheckValues(val, *reg - DR_REG_Q0, cct, pt); break;
+                        case 8: ApproxLargeRegisters<double, 16>::CheckValues(val, *reg - DR_REG_Q0, cct, pt); break;
+                        default: DR_ASSERT_MSG(false, "trace_update_cb: handle large reg with large operand size\n"); break;
+                    }
+                }break;
+                default: DR_ASSERT_MSG(false, "trace_update_cb: not recoganized simd register size for floating instruction!\n"); break;
+            }
+        } else {
+            switch(size) {
+                case 1: HandleGeneralRegisters<uint8_t, 1>::CheckValues(*val, *reg - DR_REG_B0, cct, pt); break;
+                case 2: HandleGeneralRegisters<uint16_t, 1>::CheckValues(*(uint16_t*)val, *reg - DR_REG_H0, cct, pt); break;
+                case 4: HandleGeneralRegisters<uint32_t, 1>::CheckValues(*(uint32_t*)val, *reg - DR_REG_S0, cct, pt); break;
+                case 8: HandleGeneralRegisters<uint64_t, 1>::CheckValues(*(uint64_t*)val, *reg - DR_REG_D0, cct, pt); break;
+                default: DR_ASSERT_MSG(false, "trace_update_cb: not recoganized simd register size for integer instruction!\n"); break;
+            }
+        }
+    }
+}
 #endif
 
 // template<int size, int esize, bool is_float>
@@ -1021,9 +1131,7 @@ void trace_update_cb(val_info_t *info) {
     if((TEST_OPND_MASK(type, GPR_REGISTER) || TEST_OPND_MASK(type, SIMD_REGISTER))) {
         if(!TEST_OPND_MASK(type, AFTER)) return;
         pt->bytesWritten += size;
-#ifdef X86
         InstrumentReg(size, esize, is_float, addr, val, cct, pt);
-#endif
     } else {
         if(TEST_OPND_MASK(type, AFTER)) {
             pt->bytesWritten += size;
@@ -1342,7 +1450,7 @@ static void ClientInit(int argc, const char* argv[]) {
     g_folder_name.assign(name, strlen(name));
     mkdir(g_folder_name.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
 
-    dr_fprintf(STDOUT, "REDSPY INFO] Profiling result directory: %s\n", g_folder_name.c_str());
+    dr_fprintf(STDOUT, "[REDSPY INFO] Profiling result directory: %s\n", g_folder_name.c_str());
 
     sprintf(name+strlen(name), "/redspy.log");
     gTraceFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);

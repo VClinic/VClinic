@@ -2310,6 +2310,10 @@ datacentric_dynamic_alloc(void *wrapcxt, void *user_data)
     data_handle_t data_hndl;
     data_hndl.object_type = DYNAMIC_OBJECT;
     data_hndl.path_handle = pt->dmem_alloc_ctxt_hndl;
+#ifdef DRCCTLIB_USE_ADDR
+    data_hndl.beg_addr = ptr;
+    data_hndl.end_addr = (void*)((uint64_t)ptr + pt->dmem_alloc_size);
+#endif
     init_shadow_memory_space(ptr, pt->dmem_alloc_size, data_hndl);
     (*pt->thread_dynamic_datacentric_nodes).push_back({data_hndl, pt->dmem_alloc_size});
 }
@@ -2392,9 +2396,17 @@ datacentric_static_alloc(const module_data_t *info)
 	        // DRCCTLIB_PRINTF ("symbol %s, relative addr %p, start %p, end %p\n", sym_name, (void*)syms[i].st_value, info->start, info->end);
             if (absolute == 1) {
                 // If use absolute address, no need to add up the module start address
+#ifdef DRCCTLIB_USE_ADDR
+                data_hndl.beg_addr = (void *)(syms[i].st_value);
+                data_hndl.end_addr = (void *)((uint64_t)(data_hndl.beg_addr) + (uint32_t)syms[i].st_size);
+#endif
                 init_shadow_memory_space((void *)syms[i].st_value,
                                          (uint32_t)syms[i].st_size, data_hndl);
             } else {
+#ifdef DRCCTLIB_USE_ADDR
+                data_hndl.beg_addr = (void *)((uint64_t)(info->start) + syms[i].st_value);
+                data_hndl.end_addr = (void *)((uint64_t)(data_hndl.beg_addr) + (uint32_t)syms[i].st_size);
+#endif
                 init_shadow_memory_space(
                     (void *)((uint64_t)(info->start) + syms[i].st_value),
                     (uint32_t)syms[i].st_size, data_hndl);

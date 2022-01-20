@@ -203,9 +203,19 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
     if (!opnd_is_immed_int(width)) {
         int opc = instr_get_opcode(instr);
         switch (opc) {
-            // actual esize is decided by instr encode, should be ignore?
-            case OP_dup:
-            case OP_movi:
+            case OP_dup: {
+                int low = 0;
+                int tmp = opnd_get_immed_int(width);
+                while(tmp) {
+                        if(tmp % 2) {
+                            break;
+                        }
+                        low++;
+                        tmp = tmp >> 1;
+                }
+                return 1 << low;
+            }
+
             case OP_stp:
             case OP_addp:
             case OP_cmeq:
@@ -218,7 +228,6 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
             case OP_ldr:
             case OP_ldur:
             case OP_ld2:
-            case OP_uminv:
                     return 8;
             default: return 0;
         }
@@ -234,8 +243,19 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
         default: {
             int opc = instr_get_opcode(instr);
             switch (opc) {
-                case OP_dup:
-                case OP_movi:
+                case OP_dup: {
+                    int low = 0;
+                    int tmp = opnd_get_immed_int(width);
+                    while(tmp) {
+                            if(tmp % 2) {
+                                break;
+                            }
+                            low++;
+                            tmp = tmp >> 1;
+                    }
+                    return 1 << low;
+                }
+
                 case OP_stp:
                 case OP_addp:
                 case OP_cmeq:
@@ -248,7 +268,6 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
                 case OP_ldr:
                 case OP_ldur:
                 case OP_ld2:
-                case OP_uminv:
                         return 8;
                 default: return 0;
             }
@@ -267,8 +286,20 @@ IntegerOperandSizeTable(instr_t *instr, opnd_t opnd)
     int opc = instr_get_opcode(instr);
 
     switch (opc) {
-        case OP_dup:
-        case OP_movi:
+        case OP_dup: {
+            opnd_t width = instr_get_src(instr, instr_num_srcs(instr) - 1);
+            int low = 0;
+            int tmp = opnd_get_immed_int(width);
+            while(tmp) {
+                    if(tmp % 2) {
+                        break;
+                    }
+                    low++;
+                    tmp = tmp >> 1;
+            }
+            return 1 << low;
+        }
+
         case OP_stp:
         case OP_addp:
         case OP_cmeq:

@@ -20,7 +20,22 @@
 
 /* constant defines */
 #define VPROFILE_TRACE_MASK 0xf
+#ifdef X86
+/* global TLS implementation */
+enum {
+    INSTRACE_TLS_OFFS_BUF_PTR,
+    INSTRACE_TLS_COUNT, /* total number of TLS slots allocated */
+};
 
+typedef struct _per_thread_t {
+    std::vector<instr_t*> *instr_clones;
+    std::vector<opnd_t*> *opnd_clones;
+} per_thread_t;
+
+static int tls_idx;
+static reg_id_t tls_seg;
+static uint tls_offs;
+#endif
 struct opnd_info_t {
     uint8_t size;
     uint8_t esize;
@@ -681,6 +696,7 @@ InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, int slot
             num = instr_num_dsts(instr);
             for(int j=0; j<num; ++j) {
                 opnd_t opnd = instr_get_dst(instr, j);
+                if(opnd_size_in_bytes(opnd_get_size(opnd)) == 0) continue;
                 uint32_t opmask = getOpndMask<true, true>(instr, opnd);
                 if(FILTER_OPND_MASK(trace->opnd_mask, opmask)) {
                     instrument_opnd<with_cct>(drcontext, bb, instr, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch, true, opmask);
@@ -690,6 +706,7 @@ InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, int slot
         num = instr_num_srcs(instr);
         for(int j=0; j<num; ++j) {
             opnd_t opnd = instr_get_src(instr, j);
+            if(opnd_size_in_bytes(opnd_get_size(opnd)) == 0) continue;
             uint32_t opmask = getOpndMask<false, true>(instr, opnd);
             if(FILTER_OPND_MASK(trace->opnd_mask, opmask)) {
                 instrument_opnd<with_cct>(drcontext, bb, instr, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch, true, opmask);
@@ -732,6 +749,7 @@ InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, int slot
             num = instr_num_dsts(instr);
             for(int j=0; j<num; ++j) {
                 opnd_t opnd = instr_get_dst(instr, j);
+                if(opnd_size_in_bytes(opnd_get_size(opnd)) == 0) continue;
                 uint32_t opmask = getOpndMask<true, false>(instr, opnd);
                 if(FILTER_OPND_MASK(trace->opnd_mask, opmask)) {
                     instrument_opnd<with_cct>(drcontext, bb, instr, insert_where, slot, opnd, trace, reg_addr, reg_ptr, scratch, false, opmask);
@@ -756,6 +774,917 @@ InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, int slot
     drvector_delete(&allowed);
 }
 
+#ifdef X86
+template<uint8_t size>
+void handleVCAI(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = vtrace->buff;
+
+    cache_VCAI_t cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.ctxt_hndl = ctxt_hndl;
+    cache.user_data = (*global_client_cb.user_data_cb)(drcontext, instr, bb, *opnd);
+    if(opnd_is_reg(*opnd)) {
+        cache.addr = (uint64_t)opnd_get_reg(*opnd);
+        reg_get_value_ex((reg_id_t)cache.addr, &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VCAI_t>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            cache.addr = (uint64_t)addr;
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VCAI_t>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVCA(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = vtrace->buff;
+
+    cache_VCA_t cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.ctxt_hndl = ctxt_hndl;
+    if(opnd_is_reg(*opnd)) {
+        cache.addr = (uint64_t)opnd_get_reg(*opnd);
+        reg_get_value_ex((reg_id_t)cache.addr, &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VCA_t>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            cache.addr = (uint64_t)addr;
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VCA_t>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVCI(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = vtrace->buff;
+
+    cache_VCI_t cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.ctxt_hndl = ctxt_hndl;
+    cache.user_data = (*global_client_cb.user_data_cb)(drcontext, instr, bb, *opnd);
+    if(opnd_is_reg(*opnd)) {
+        reg_get_value_ex(opnd_get_reg(*opnd), &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VCI_t>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VCI_t>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVC(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = vtrace->buff;
+
+    cache_VC_t cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.ctxt_hndl = ctxt_hndl;
+    if(opnd_is_reg(*opnd)) {
+        reg_get_value_ex(opnd_get_reg(*opnd), &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VC_t>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VC_t>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVAI(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = vtrace->buff;
+
+    cache_VAI_t cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.user_data = (*global_client_cb.user_data_cb)(drcontext, instr, bb, *opnd);
+    if(opnd_is_reg(*opnd)) {
+        cache.addr = (uint64_t)opnd_get_reg(*opnd);
+        reg_get_value_ex((reg_id_t)cache.addr, &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VAI_t>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            cache.addr = (uint64_t)addr;
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VAI_t>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVA(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = vtrace->buff;
+
+    cache_VA_t cache;
+    cache.opnd_info = opnd_info_pack;
+    if(opnd_is_reg(*opnd)) {
+        cache.addr = (uint64_t)opnd_get_reg(*opnd);
+        reg_get_value_ex((reg_id_t)cache.addr, &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VA_t>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            cache.addr = (uint64_t)addr;
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VA_t>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVI(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = vtrace->buff;
+
+    cache_VI_t cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.user_data = (*global_client_cb.user_data_cb)(drcontext, instr, bb, *opnd);
+    if(opnd_is_reg(*opnd)) {
+        reg_get_value_ex(opnd_get_reg(*opnd), &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VI_t>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VI_t>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleV(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = vtrace->buff;
+
+    cache_V_t cache;
+    cache.opnd_info = opnd_info_pack;
+    if(opnd_is_reg(*opnd)) {
+        reg_get_value_ex(opnd_get_reg(*opnd), &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_V_t>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_V_t>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVCAISZ(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = get_trace_buf(vtrace, is_float, size, size);
+
+    cache_VCAI_sz_t<size> cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.ctxt_hndl = ctxt_hndl;
+    cache.user_data = (*global_client_cb.user_data_cb)(drcontext, instr, bb, *opnd);
+    if(opnd_is_reg(*opnd)) {
+        cache.addr = (uint64_t)opnd_get_reg(*opnd);
+        reg_get_value_ex((reg_id_t)cache.addr, &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VCAI_sz_t<size>>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            cache.addr = (uint64_t)addr;
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VCAI_sz_t<size>>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVCASZ(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = get_trace_buf(vtrace, is_float, size, size);
+
+    cache_VCA_sz_t<size> cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.ctxt_hndl = ctxt_hndl;
+    if(opnd_is_reg(*opnd)) {
+        cache.addr = (uint64_t)opnd_get_reg(*opnd);
+        reg_get_value_ex((reg_id_t)cache.addr, &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VCA_sz_t<size>>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            cache.addr = (uint64_t)addr;
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VCA_sz_t<size>>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVCISZ(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = get_trace_buf(vtrace, is_float, size, size);
+
+    cache_VCI_sz_t<size> cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.ctxt_hndl = ctxt_hndl;
+    cache.user_data = (*global_client_cb.user_data_cb)(drcontext, instr, bb, *opnd);
+    if(opnd_is_reg(*opnd)) {
+        reg_get_value_ex(opnd_get_reg(*opnd), &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VCI_sz_t<size>>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VCI_sz_t<size>>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVCSZ(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = get_trace_buf(vtrace, is_float, size, size);
+
+    cache_VC_sz_t<size> cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.ctxt_hndl = ctxt_hndl;
+    if(opnd_is_reg(*opnd)) {
+        reg_get_value_ex(opnd_get_reg(*opnd), &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VC_sz_t<size>>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VC_sz_t<size>>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVAISZ(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = get_trace_buf(vtrace, is_float, size, size);
+
+    cache_VAI_sz_t<size> cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.user_data = (*global_client_cb.user_data_cb)(drcontext, instr, bb, *opnd);
+    if(opnd_is_reg(*opnd)) {
+        cache.addr = (uint64_t)opnd_get_reg(*opnd);
+       reg_get_value_ex((reg_id_t)cache.addr, &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VAI_sz_t<size>>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            cache.addr = (uint64_t)addr;
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VAI_sz_t<size>>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVASZ(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = get_trace_buf(vtrace, is_float, size, size);
+
+    cache_VA_sz_t<size> cache;
+    cache.opnd_info = opnd_info_pack;
+    if(opnd_is_reg(*opnd)) {
+        cache.addr = (uint64_t)opnd_get_reg(*opnd);
+        reg_get_value_ex((reg_id_t)cache.addr, &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VA_sz_t<size>>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            cache.addr = (uint64_t)addr;
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VA_sz_t<size>>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVISZ(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = get_trace_buf(vtrace, is_float, size, size);
+
+    cache_VI_sz_t<size> cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.user_data = (*global_client_cb.user_data_cb)(drcontext, instr, bb, *opnd);
+    if(opnd_is_reg(*opnd)) {
+        reg_get_value_ex(opnd_get_reg(*opnd), &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_VI_sz_t<size>>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_VI_sz_t<size>>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleVSZ(vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    vtrace_buffer_t* buf = get_trace_buf(vtrace, is_float, size, size);
+
+    cache_V_sz_t<size> cache;
+    cache.opnd_info = opnd_info_pack;
+    if(opnd_is_reg(*opnd)) {
+        reg_get_value_ex(opnd_get_reg(*opnd), &mcontext, (byte*)cache.val);
+        vtracer_update_clean_call<cache_V_sz_t<size>>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            memcpy((void*)cache.val, (void*)addr, size);
+            vtracer_update_clean_call<cache_V_sz_t<size>>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleCAI(vtrace_t *trace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    bool strictly_ordered = TEST_FLAG(trace->trace_flag, VPROFILE_TRACE_STRICTLY_ORDERED);
+    vtrace_buffer_t* buf = strictly_ordered ? trace->buff : get_trace_buf(trace, is_float, size, size);
+
+    cache_CAI_t cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.ctxt_hndl = ctxt_hndl;
+    cache.user_data = (*global_client_cb.user_data_cb)(drcontext, instr, bb, *opnd);
+    if(opnd_is_reg(*opnd)) {
+        cache.addr = (uint64_t)opnd_get_reg(*opnd);
+        vtracer_update_clean_call<cache_CAI_t>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            cache.addr = (uint64_t)addr;
+            vtracer_update_clean_call<cache_CAI_t>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleCA(vtrace_t *trace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    bool strictly_ordered = TEST_FLAG(trace->trace_flag, VPROFILE_TRACE_STRICTLY_ORDERED);
+    vtrace_buffer_t* buf = strictly_ordered ? trace->buff : get_trace_buf(trace, is_float, size, size);
+
+    cache_CA_t cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.ctxt_hndl = ctxt_hndl;
+    if(opnd_is_reg(*opnd)) {
+        cache.addr = (uint64_t)opnd_get_reg(*opnd);
+        vtracer_update_clean_call<cache_CA_t>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            cache.addr = (uint64_t)addr;
+            vtracer_update_clean_call<cache_CA_t>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleCI(vtrace_t *trace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    bool strictly_ordered = TEST_FLAG(trace->trace_flag, VPROFILE_TRACE_STRICTLY_ORDERED);
+    vtrace_buffer_t* buf = strictly_ordered ? trace->buff : get_trace_buf(trace, is_float, size, size);
+
+    cache_CI_t cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.ctxt_hndl = ctxt_hndl;
+    cache.user_data = (*global_client_cb.user_data_cb)(drcontext, instr, bb, *opnd);
+    if(opnd_is_reg(*opnd)) {
+        vtracer_update_clean_call<cache_CI_t>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            vtracer_update_clean_call<cache_CI_t>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleAI(vtrace_t *trace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    bool strictly_ordered = TEST_FLAG(trace->trace_flag, VPROFILE_TRACE_STRICTLY_ORDERED);
+    vtrace_buffer_t* buf = strictly_ordered ? trace->buff : get_trace_buf(trace, is_float, size, size);
+
+    cache_AI_t cache;
+    cache.opnd_info = opnd_info_pack;
+    cache.user_data = (*global_client_cb.user_data_cb)(drcontext, instr, bb, *opnd);
+    if(opnd_is_reg(*opnd)) {
+        cache.addr = (uint64_t)opnd_get_reg(*opnd);
+        vtracer_update_clean_call<cache_AI_t>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            cache.addr = (uint64_t)addr;
+            vtracer_update_clean_call<cache_AI_t>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<uint8_t size>
+void handleA(vtrace_t *trace, int slot, instrlist_t *bb, instr_t* instr, opnd_t *opnd, uint32_t type) {
+    void *drcontext = dr_get_current_drcontext();
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags = DR_MC_ALL;
+    dr_get_mcontext(drcontext, &mcontext);
+
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+
+    opnd_info_pack_t opnd_info_pack;
+    opnd_info_pack.info.size = size;
+    opnd_info_pack.info.esize = size;
+    opnd_info_pack.info.opnd_type = (uint16_t)(type&0xffff);
+    DR_ASSERT((type & 0xffff) == type);
+
+    bool strictly_ordered = TEST_FLAG(trace->trace_flag, VPROFILE_TRACE_STRICTLY_ORDERED);
+    vtrace_buffer_t* buf = strictly_ordered ? trace->buff : get_trace_buf(trace, is_float, size, size);
+
+    cache_A_t cache;
+    cache.opnd_info = opnd_info_pack;
+    if(opnd_is_reg(*opnd)) {
+        cache.addr = (uint64_t)opnd_get_reg(*opnd);
+        vtracer_update_clean_call<cache_A_t>(drcontext, buf, cache);
+    } else {
+        app_pc addr;
+        bool is_write;
+        uint32_t pos;
+        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
+            DR_ASSERT(!is_write);
+            cache.addr = (uint64_t)addr;
+            vtracer_update_clean_call<cache_A_t>(drcontext, buf, cache);
+        }
+    }
+}
+
+template<int size>
+void handleType(void *drcontext, vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, instr_t* insert_where, opnd_t opnd, uint32_t type) {
+    uint32_t trace_flag = (vtrace->trace_flag & VPROFILE_TRACE_MASK);
+    bool strictly_ordered = TEST_FLAG(vtrace->trace_flag, VPROFILE_TRACE_STRICTLY_ORDERED);
+
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+
+    instr_t* ins_clone = instr_clone(drcontext, instr);
+    opnd_t* opnd_clone = new opnd_t(opnd);
+
+    pt->instr_clones->push_back(ins_clone);
+    pt->opnd_clones->push_back(opnd_clone);
+
+    switch(trace_flag) {
+        case VPROFILE_TRACE_VAL_CCT_ADDR_INFO: strictly_ordered ? dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVCAI<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type)) : dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVCAISZ<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type));break;
+
+        case VPROFILE_TRACE_VAL_CCT_ADDR: strictly_ordered ? dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVCA<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type)) : dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVCASZ<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type));break;
+
+        case VPROFILE_TRACE_VAL_CCT_INFO: strictly_ordered ? dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVCI<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type)) : dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVCISZ<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type));break;
+
+        case VPROFILE_TRACE_VAL_CCT: strictly_ordered ? dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVC<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type)) : dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVCSZ<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type));break;
+
+        case VPROFILE_TRACE_VAL_ADDR_INFO: strictly_ordered ? dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVAI<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type)) : dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVAISZ<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type));break;
+
+        case VPROFILE_TRACE_VAL_ADDR: strictly_ordered ? dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVA<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type)) : dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVASZ<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type));break;
+
+        case VPROFILE_TRACE_VAL_INFO: strictly_ordered ? dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVI<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type)) : dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVISZ<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type));break;
+
+        case VPROFILE_TRACE_VALUE: strictly_ordered ? dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleV<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type)) : dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleVSZ<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type));break;
+
+        case VPROFILE_TRACE_CCT_ADDR_INFO: dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleCAI<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type));break;
+
+        case VPROFILE_TRACE_CCT_ADDR: dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleCA<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type));break;
+
+        case VPROFILE_TRACE_CCT_INFO: dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleCI<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type));
+
+        case VPROFILE_TRACE_ADDR_INFO: dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleAI<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type));break;
+
+        case VPROFILE_TRACE_ADDR: dr_insert_clean_call(drcontext, bb, insert_where, (void *)handleA<size>, false, 6, OPND_CREATE_INTPTR(vtrace), OPND_CREATE_INT32(slot), OPND_CREATE_INTPTR(bb), OPND_CREATE_INTPTR(ins_clone), OPND_CREATE_INTPTR(opnd_clone), OPND_CREATE_INT32(type));break;
+        default:
+            DR_ASSERT_MSG(false, "Unknown trace flag!");
+    }
+}
+
+void handleOpnd(void *drcontext, vtrace_t *vtrace, int slot, instrlist_t *bb, instr_t* instr, instr_t* insert_where, opnd_t opnd, uint32_t type) {
+    bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
+    int esize = (is_float) ? FloatOperandSizeTable(instr, opnd) : IntegerOperandSizeTable(instr, opnd);
+
+    switch(esize) {
+        case 4: handleType<4>(drcontext, vtrace, slot, bb, instr, insert_where, opnd, type);break;
+        case 8: handleType<8>(drcontext, vtrace, slot, bb, instr, insert_where, opnd, type);break;
+        default: {
+#ifdef VPROFILE_DEBUG
+        debug_unknown_case(dr_get_current_drcontext(), instr, opnd);
+#endif
+        }
+    }
+}
+
+// gather:load -- mem read before, reg write before/after
+// scatter:store -- mem write before / after, reg read before
+void handleVGatherScatter(int slot, instrlist_t *bb, instr_t* instr) {
+    void *drcontext = dr_get_current_drcontext();
+    if(global_client_cb.ins_instrument_cb)
+        (*global_client_cb.ins_instrument_cb)(drcontext, instr, bb);
+
+    for (unsigned int i = 0; i < vtrace_t_list.entries; ++i) {
+        vtrace_t *trace = (vtrace_t*)drvector_get_entry(&vtrace_t_list, i);
+        if(TEST_FLAG(trace->trace_flag, VPROFILE_TRACE_BEFORE_WRITE)) {
+            int num = instr_num_dsts(instr);
+            for(int j=0; j<num; ++j) {
+                opnd_t opnd = instr_get_dst(instr, j);
+                if(opnd_size_in_bytes(opnd_get_size(opnd)) == 0) continue;
+                uint32_t opmask = getOpndMask<true, true>(instr, opnd);
+                if(FILTER_OPND_MASK(trace->opnd_mask, opmask)) {
+                    handleOpnd(drcontext, trace, slot, bb, instr, instr, opnd, opmask);
+                }
+            }
+        }
+        int num = instr_num_srcs(instr);
+        for(int j=0; j<num; ++j) {
+            opnd_t opnd = instr_get_src(instr, j);
+            if(opnd_size_in_bytes(opnd_get_size(opnd)) == 0) continue;
+            uint32_t opmask = getOpndMask<false, true>(instr, opnd);
+            if(FILTER_OPND_MASK(trace->opnd_mask, opmask)) {
+                handleOpnd(drcontext, trace, slot, bb, instr, instr, opnd, opmask);
+                if(TEST_FLAG(trace->trace_flag, VPROFILE_TRACE_REG_IN_MEMREF) && TEST_OPND_MASK(opmask, MEMORY)) {
+                    int reg_num = opnd_num_regs_used(opnd);
+                    for(int k = 0; k < reg_num; k++) {
+                        opnd_t reg_used = opnd_create_reg(opnd_get_reg_used(opnd, k));
+                        int reg_size = opnd_size_in_bytes(opnd_get_size(reg_used));
+                        if(reg_size == 0) {
+                            continue;
+                        }
+                        handleOpnd(drcontext, trace, slot, bb, instr, instr, reg_used, opmask);
+                    }
+                } 
+            }
+        }
+    }
+
+    if(!instr_is_cti(instr) && !instr_is_syscall(instr)) {
+        instr_t *insert_where = instr_get_next_app(instr);
+        if(!insert_where) {
+            instrlist_meta_postinsert(bb, instr, XINST_CREATE_nop(drcontext));
+            insert_where = instr_get_next(instr);
+        }
+
+        for (unsigned int i = 0; i < vtrace_t_list.entries; ++i) {
+            vtrace_t *trace = (vtrace_t*)drvector_get_entry(&vtrace_t_list, i);
+            int num = instr_num_dsts(instr);
+            for(int j=0; j<num; ++j) {
+                opnd_t opnd = instr_get_dst(instr, j);
+                if(opnd_size_in_bytes(opnd_get_size(opnd)) == 0) continue;
+                uint32_t opmask = getOpndMask<true, false>(instr, opnd);
+                if(FILTER_OPND_MASK(trace->opnd_mask, opmask)) {
+                    handleOpnd(drcontext, trace, slot, bb, instr, insert_where, opnd, opmask);
+                    if(TEST_FLAG(trace->trace_flag, VPROFILE_TRACE_REG_IN_MEMREF) && TEST_OPND_MASK(opmask, MEMORY)) {
+                        int reg_num = opnd_num_regs_used(opnd);
+                        for(int k = 0; k < reg_num; k++) {
+                            opnd_t reg_used = opnd_create_reg(opnd_get_reg_used(opnd, k));
+                            int reg_size = opnd_size_in_bytes(opnd_get_size(reg_used));
+                            if(reg_size == 0) {
+                                continue;
+                            }
+                            handleOpnd(drcontext, trace, slot, bb, instr, insert_where, reg_used, opmask);
+                        }
+                    } 
+                }
+            }
+        }
+    }
+}
+#endif
+
 void
 InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
 {
@@ -771,8 +1700,12 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
         if(global_client_cb.bb_instrument_cb)
             (*global_client_cb.bb_instrument_cb)(drcontext, bb);
     } 
-
-    InstrumentInstruction<true>(drcontext, bb, instr, slot);
+#ifdef X86
+    if(instr_is_gather(instr) || instr_is_scatter(instr)) {
+        handleVGatherScatter(slot, bb, instr);
+    } else 
+#endif
+        InstrumentInstruction<true>(drcontext, bb, instr, slot);
 }
 
 static dr_emit_flags_t
@@ -786,7 +1719,12 @@ event_basic_block_default(void *drcontext, void *tag, instrlist_t *bb, bool for_
     for (instr = instrlist_first(bb); instr != NULL; instr = instr_get_next(instr)) {
         if(!instr_is_app(instr) || instr_is_ignorable(instr)) continue;
         if(global_instr_filter(instr)) {
-            InstrumentInstruction<false>(drcontext, bb, instr, 0/*not used*/);
+#ifdef X86
+            if(instr_is_gather(instr) || instr_is_scatter(instr)) {
+                handleVGatherScatter(0, bb, instr);
+            } else 
+#endif
+                InstrumentInstruction<false>(drcontext, bb, instr, 0/*not used*/);
         }
     }
     
@@ -806,7 +1744,29 @@ void vprofile_register_client_cb(void* (*user_data_cb)(void *, instr_t *, instrl
     global_client_cb.ins_instrument_cb = ins_instrument_cb;
     global_client_cb.bb_instrument_cb = bb_instrument_cb;
 }
+#ifdef X86
+static void
+ClientThreadEnd(void *drcontext)
+{
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    delete pt->instr_clones;
+    delete pt->opnd_clones;
+    dr_thread_free(drcontext, pt, sizeof(per_thread_t));
+}
 
+static void
+ClientThreadStart(void *drcontext)
+{
+    per_thread_t *pt = (per_thread_t *)dr_thread_alloc(drcontext, sizeof(per_thread_t));
+    if (pt == NULL) {
+        DR_ASSERT_MSG(0, "pt == NULL\n");
+    }
+    pt->opnd_clones = new std::vector<opnd_t*>();
+    pt->instr_clones = new std::vector<instr_t*>();
+    drmgr_set_tls_field(drcontext, tls_idx, (void *)pt);
+}
+
+#endif
 bool vprofile_init(bool (*filter)(instr_t *),
                    void* (*user_data_cb)(void *, instr_t *, instrlist_t *, opnd_t),
                    void (*ins_instrument_cb)(void *, instr_t *, instrlist_t *),
@@ -835,7 +1795,28 @@ bool vprofile_init(bool (*filter)(instr_t *),
     if(!vtracer_init()) {
         DR_ASSERT_MSG(false, "ERROR: vprofile unable to initialize vtracer");
     }
+#ifdef X86
+    drmgr_priority_t thread_init_pri = { sizeof(thread_init_pri),
+                                         "vprofile-thread-init", NULL, NULL,
+                                         DRCCTLIB_THREAD_EVENT_PRI + 1 };
+    drmgr_priority_t thread_exit_pri = { sizeof(thread_exit_pri),
+                                         "vprofile-thread-exit", NULL, NULL,
+                                         DRCCTLIB_THREAD_EVENT_PRI - 1 };
 
+    if (   !drmgr_register_thread_init_event_ex(ClientThreadStart, &thread_init_pri) 
+        || !drmgr_register_thread_exit_event_ex(ClientThreadEnd, &thread_exit_pri) ) {
+        DR_ASSERT_MSG(false, "ERROR: vprofile unable to register events");
+    }
+
+    tls_idx = drmgr_register_tls_field();
+    if (tls_idx == -1) {
+        DR_ASSERT_MSG(false, "ERROR: vprofile drmgr_register_tls_field fail");
+    }
+    if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, INSTRACE_TLS_COUNT, 0)) {
+        DR_ASSERT_MSG(false, "ERROR: vprofile dr_raw_tls_calloc fail");
+    }
+
+#endif
     if(!drvector_init(&vtrace_t_list, 1, false /*!synch*/, NULL)) {
         DR_ASSERT_MSG(false, "ERROR: vprofile unable to init drvector");
     }
@@ -865,6 +1846,11 @@ bool vprofile_init(bool (*filter)(instr_t *),
 
 void vprofile_exit()
 {
+    drmgr_unregister_thread_init_event(ClientThreadStart);
+    drmgr_unregister_thread_exit_event(ClientThreadEnd);
+    drmgr_unregister_tls_field(tls_idx);
+    dr_raw_tls_cfree(tls_offs, INSTRACE_TLS_COUNT);
+
 #ifdef VPROFILE_DEBUG
     LOG_FINI();
     dr_close_file(gDebug);
@@ -1143,17 +2129,18 @@ vprofile_fill_num_cb(void *drcontext, instr_t *where, void* user_data)
     int num = instr_num_dsts(where);
     for(int j=0; j<num; ++j) {
         opnd_t opnd = instr_get_dst(where, j);
+        if(opnd_size_in_bytes(opnd_get_size(opnd)) == 0) continue;
 
         if(!instr_is_cti(where) && !instr_is_syscall(where)) {
             uint32_t opndmask = getOpndMask<true, false>(where, opnd);
-            if((*((bool (*)(opnd_t, vprofile_data_t)) user_data))(opnd, (vprofile_data_t)opndmask)) {
+            if((*((bool (*)(opnd_t, vprofile_src_t)) user_data))(opnd, (vprofile_src_t)opndmask)) {
                 fill_num += sizeof(T);
             }
         }
 
         if(trace_before_write) {
             uint32_t opndmask = getOpndMask<true, true>(where, opnd);
-            if((*((bool (*)(opnd_t, vprofile_data_t)) user_data))(opnd, (vprofile_data_t)opndmask)) {
+            if((*((bool (*)(opnd_t, vprofile_src_t)) user_data))(opnd, (vprofile_src_t)opndmask)) {
                 fill_num += sizeof(T);
             }
         }
@@ -1162,8 +2149,9 @@ vprofile_fill_num_cb(void *drcontext, instr_t *where, void* user_data)
     num = instr_num_srcs(where);
     for(int j=0; j<num; ++j) {
         opnd_t opnd = instr_get_src(where, j);
+        if(opnd_size_in_bytes(opnd_get_size(opnd)) == 0) continue;
         uint32_t opndmask = getOpndMask<false, true>(where, opnd);
-        if((*((bool (*)(opnd_t, vprofile_data_t)) user_data))(opnd, (vprofile_data_t)opndmask)) {
+        if((*((bool (*)(opnd_t, vprofile_src_t)) user_data))(opnd, (vprofile_src_t)opndmask)) {
             fill_num += sizeof(T);
         }
     }
@@ -1183,7 +2171,7 @@ size_t vprofile_fill_num_type_specialized_cb(void *drcontext, instr_t *where, vo
 
         if(!instr_is_cti(where) && !instr_is_syscall(where)) {
             uint32_t opndmask = getOpndMask<true, false>(where, opnd);
-            if((*((bool (*)(opnd_t, vprofile_data_t)) user_data))(opnd, (vprofile_data_t)opndmask) && 
+            if((*((bool (*)(opnd_t, vprofile_src_t)) user_data))(opnd, (vprofile_src_t)opndmask) && 
                TEST_OPND_MASK(opndmask, IS_FLOATING) == is_float && 
                esize == esize_actual && 
                opnd_size_in_bytes(opnd_get_size(opnd)) == sz) {
@@ -1193,7 +2181,7 @@ size_t vprofile_fill_num_type_specialized_cb(void *drcontext, instr_t *where, vo
 
         if(trace_before_write) {
             uint32_t opndmask = getOpndMask<true, true>(where, opnd);
-            if((*((bool (*)(opnd_t, vprofile_data_t)) user_data))(opnd, (vprofile_data_t)opndmask) &&
+            if((*((bool (*)(opnd_t, vprofile_src_t)) user_data))(opnd, (vprofile_src_t)opndmask) &&
               TEST_OPND_MASK(opndmask, IS_FLOATING) == is_float &&
               esize == esize_actual &&
               opnd_size_in_bytes(opnd_get_size(opnd)) == sz) {
@@ -1207,7 +2195,7 @@ size_t vprofile_fill_num_type_specialized_cb(void *drcontext, instr_t *where, vo
         opnd_t opnd = instr_get_src(where, j);
         uint32_t opndmask = getOpndMask<false, true>(where, opnd);
         int esize_actual = (is_float) ? FloatOperandSizeTable(where, opnd) : IntegerOperandSizeTable(where, opnd);
-        if((*((bool (*)(opnd_t, vprofile_data_t)) user_data))(opnd, (vprofile_data_t)opndmask) && 
+        if((*((bool (*)(opnd_t, vprofile_src_t)) user_data))(opnd, (vprofile_src_t)opndmask) && 
           TEST_OPND_MASK(opndmask, IS_FLOATING) == is_float && 
           esize == esize_actual && 
           opnd_size_in_bytes(opnd_get_size(opnd)) == sz) {

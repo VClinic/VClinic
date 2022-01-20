@@ -107,6 +107,8 @@ bool LOADSPY_FILTER_MEM_ACCESS_INSTR(instr_t *instr) {
         case OP_fnsave:
         case OP_fldcw:
         case OP_fnstcw:
+        case OP_xrstor32:
+        case OP_xrstor64:
             return false;
         default: return true;
     }
@@ -268,11 +270,28 @@ struct UnrolledSubLoop {
             T rate = (newValue - oldValue) / oldValue;
             isRed = (rate <= delta && rate >= -delta);
         } else {
-            isRed = (*((T *) (prev)) == *(static_cast<T *>(addr)));
+            isRed = (reinterpret_cast<const T *> (prev)[start] == reinterpret_cast<const T *> (addr)[start]);
         }
 
         return isRed &&
                UnrolledSubLoop<start + incr, end, incr, T, isApprox>::BodyISRed(addr, prev);   // unroll next iteration
+    }
+
+    static __attribute__((always_inline)) bool BodyStraddleISRed(void *addr, void *val) {
+        bool isRed = false;
+        uint8_t *prev = (uint8_t *)val_sm->GetOrCreateShadowAddress((size_t)addr+start);
+
+        if (isApprox) {
+            T oldValue = reinterpret_cast<const T *> (prev)[0];
+            T newValue = reinterpret_cast<const T *> (val)[start];
+            T rate = (newValue - oldValue) / oldValue;
+            isRed = (rate <= delta && rate >= -delta);
+        } else {
+            isRed = (reinterpret_cast<const T *> (prev)[0] == reinterpret_cast<const T *> (val)[start]);
+        }
+
+        return isRed &&
+               UnrolledSubLoop<start + incr, end, incr, T, isApprox>::BodyStraddleISRed(addr, val);   // unroll next iteration
     }
 };
 
@@ -280,6 +299,7 @@ template<int end, int incr, class T, bool isApprox>
 struct UnrolledSubLoop<end, end, incr, T, isApprox> {
     static __attribute__((always_inline)) bool Body(function<bool (const int)> func){ return true;}
     static __attribute__((always_inline)) bool BodyISRed(void *addr, uint8_t *prev) { return true; }
+    static __attribute__((always_inline)) bool BodyStraddleISRed(void *addr, void *val) { return true; }
 };
 
 template<int start, int end, int incr, class T>
@@ -293,13 +313,20 @@ struct UnrolledCopy {
         *((T *) (prev + start)) = *(static_cast<T *>(addr) + start);
         UnrolledCopy<start + incr, end, incr, T>::BodyCopy(addr, prev);   // unroll next iteration
     }
+
+    static __attribute__((always_inline)) void BodyStraddleCopy(void *addr, void *val) {
+        uint8_t *prev = (uint8_t *)val_sm->GetOrCreateShadowAddress((size_t)addr+start);
+
+        *((T *) (prev)) = *(static_cast<T *>(val) + start);
+        UnrolledCopy<start + incr, end, incr, T>::BodyStraddleCopy(addr, val);   // unroll next iteration
+    }
 };
 
 template<int end, int incr, class T>
 struct UnrolledCopy<end, end, incr, T> {
     static __attribute__((always_inline)) void Body(function<void(const int)> func) {}
-
     static __attribute__((always_inline)) void BodyCopy(void *addr, uint8_t *prev) {}
+    static __attribute__((always_inline)) void BodyStraddleCopy(void *addr, void *val) {}
 };
 
 template<class T, uint32_t AccessLen, bool isApprox>
@@ -310,10 +337,17 @@ struct RedSpyAnalysis{
         uint8_t* prevValue = val_sm->GetOrCreateShadowAddress((size_t)addr);
         
         // bool isRedundantRead = IsReadRedundant((void*)val, prevValue);
-        bool isRedundantRead = UnrolledSubLoop<0, AccessLen/sizeof(T), 1, T, isApprox>::BodyISRed((void*)val, prevValue);
-        UnrolledCopy<0, AccessLen/sizeof(T), 1, T>::BodyCopy((void*)val, prevValue);
+        bool isRedundantRead = false;
         
         const bool isAccessWithinPageBoundary = IS_ACCESS_WITHIN_PAGE_BOUNDARY( (uint64_t)addr, AccessLen);
+        if(isAccessWithinPageBoundary) {
+            isRedundantRead = UnrolledSubLoop<0, AccessLen/sizeof(T), 1, T, isApprox>::BodyISRed((void*)val, prevValue);
+            UnrolledCopy<0, AccessLen/sizeof(T), 1, T>::BodyCopy((void*)val, prevValue);
+        } else {
+            isRedundantRead = UnrolledSubLoop<0, AccessLen/sizeof(T), 1, T, isApprox>::BodyStraddleISRed((void*)addr, (void*)val);
+            UnrolledCopy<0, AccessLen/sizeof(T), 1, T>::BodyStraddleCopy((void*)addr, (void*)val);
+        }
+
         if(isRedundantRead) {
             // detected redundancy
             if(isAccessWithinPageBoundary) {
@@ -422,6 +456,13 @@ void trace_update_cb(val_info_t *info) {
                         default: DR_ASSERT_MSG(false, "trace_update_cb: handle large mem read with unexpected operand size\n"); break;
                     }
                 }break;
+                case 64: {
+                    switch(esize) {
+                        case 4: RedSpyAnalysis<float, 64, true>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                        case 8: RedSpyAnalysis<double, 64, true>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                        default: DR_ASSERT_MSG(false, "trace_update_cb: handle large mem read with unexpected operand size\n"); break;
+                    }
+                }break;
                 default: DR_ASSERT_MSG(false, "trace_update_cb: unexpected large memory read"); break;
             }
         } else {
@@ -430,7 +471,30 @@ void trace_update_cb(val_info_t *info) {
                 case 2: RedSpyAnalysis<uint16_t, 2, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
                 case 4: RedSpyAnalysis<uint32_t, 4, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
                 case 8: RedSpyAnalysis<uint64_t, 8, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
-                case 16: RedSpyAnalysis<uint8_t, 16, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                case 16: {
+                    switch(esize) {
+                        case 2: RedSpyAnalysis<uint16_t, 16, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                        case 4: RedSpyAnalysis<uint32_t, 16, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                        case 8: RedSpyAnalysis<uint64_t, 16, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                        default: RedSpyAnalysis<uint8_t, 16, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                    }
+                }break;
+                case 32: {
+                    switch(esize) {
+                        case 2: RedSpyAnalysis<uint16_t, 32, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                        case 4: RedSpyAnalysis<uint32_t, 32, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                        case 8: RedSpyAnalysis<uint64_t, 32, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                        default: RedSpyAnalysis<uint8_t, 32, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                    }
+                }break;
+                case 64:  {
+                    switch(esize) {
+                        case 2: RedSpyAnalysis<uint16_t, 64, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                        case 4: RedSpyAnalysis<uint32_t, 64, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                        case 8: RedSpyAnalysis<uint64_t, 64, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                        default: RedSpyAnalysis<uint8_t, 64, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
+                    }
+                }break;
                 default: CheckAfterLargeRead(addr, val, size, cct, pt); break;
             }
         }

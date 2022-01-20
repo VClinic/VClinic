@@ -244,6 +244,24 @@ void vtracer_insert_trace_constant(void *drcontext, instr_t *where,
     VTRACER_LOG(SUMMARY, "exit vtracer_insert_trace_constant\n");
 }
 
+/**
+ * Can be called by clean call func to trace T into buffer.
+ * @param T: passed in struct type.
+ * @param buf: the vtrace buffer to be filled in.
+ * @param cache: passed in struct, will be filled into buffer.
+ * */
+template<typename T>
+DR_EXPORT
+void vtracer_update_clean_call(void *drcontext, vtrace_buffer_t *buf, T cache) {
+    byte *buf_ptr = (byte*)vtracer_get_buf_ptr(drcontext, buf);
+    memcpy(buf_ptr, &cache, sizeof(T));
+    buf_ptr = buf_ptr + sizeof(T);
+#ifdef VTRACER_DEBUG
+    per_thread_t *data = (per_thread_t*)drmgr_get_tls_field(drcontext, buf->tls_idx);
+    data->scratch -= sizeof(T);
+    DR_ASSERT_MSG(data->scratch >= 0, "Usage Error: Estimated Fill number too small!");
+#endif
+}
 
 /**
  * Mark some instructions like nop are ignorable.

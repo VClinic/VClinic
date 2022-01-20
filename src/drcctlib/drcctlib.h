@@ -209,6 +209,10 @@ typedef struct _data_handle_t {
         context_handle_t path_handle;
         int32_t sym_name;
     };
+#ifdef DRCCTLIB_USE_ADDR
+    void* beg_addr;
+    void* end_addr;
+#endif
 } data_handle_t;
 
 /* API for data centric */
