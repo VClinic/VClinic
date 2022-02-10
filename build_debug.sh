@@ -5,7 +5,7 @@
 # Licensed under the MIT License.
 # See LICENSE file for more information.
 # **********************************************************
-
+set -e
 CUR_DIR=$(cd "$(dirname "$0")";pwd)
 
 echo -e "init env..."
