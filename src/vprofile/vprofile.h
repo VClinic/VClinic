@@ -57,7 +57,7 @@ struct vtrace_t {
 
 // within int32
 enum vprofile_src_t {
-  INVALID=0x0,
+  VPROFILE_SRC_INVALID=0x0,
   // basic opnd attributes
   GPR_REGISTER=0x1,
   SIMD_REGISTER=0x2,

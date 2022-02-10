@@ -1,7 +1,7 @@
 #! /bin/bash
 
 # **********************************************************
-# Copyright (c) 2020 Xuhpclab. All rights reserved.
+# Copyright (c) 2022 BUAA HIPO. All rights reserved.
 # Licensed under the MIT License.
 # See LICENSE file for more information.
 # **********************************************************
@@ -85,7 +85,7 @@ $DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t deadspy -- /bin/ls > /dev/null &&
     echo -e "\033[32m----------PASSED---------\033[0m" ||
         (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
 
-echo -e "\033[32m----------Test 4 (trivialspy tool single thread)---------\033[0m"
+echo -e "\033[32m----------Test 5 (trivialspy tool single thread)---------\033[0m"
 $DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t trivialspy -- /bin/ls > /dev/null &&
     echo -e "\033[32m----------PASSED---------\033[0m" ||
         (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
