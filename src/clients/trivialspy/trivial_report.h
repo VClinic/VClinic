@@ -74,11 +74,10 @@ void generateThreadDetailedReport(file_t file, per_thread_log_t *pt, std::vector
     }
 }
 
-void generateThreadReport(void* drcontext, file_t file, file_t gFile, int threshold, int max_print) {
+void generateThreadReport(per_thread_log_t *pt, uint64_t* bb_ref, file_t file, file_t gFile, int threshold, int max_print) {
     // first generate dfg summaries for reporting
-    TrivialLoggerGenerateDFGSummaryCache(drcontext, threshold);
+    TrivialLoggerGenerateDFGSummaryCache(pt, bb_ref, threshold);
     // extract the results
-    per_thread_log_t *pt = (per_thread_log_t *)drmgr_get_tls_field(drcontext, global_log_space.tls_idx);
     int threadId = pt->threadId;
     uint64_t totalCost = pt->total_cost;
     uint64_t totalSB = pt->SB;
@@ -91,7 +90,6 @@ void generateThreadReport(void* drcontext, file_t file, file_t gFile, int thresh
     dr_fprintf(file, "------ [Thread=%d] Dumping Dataflow-aware Trivial Inefficiency Report ------\n", threadId);
     std::vector<int32_t> logged_cct;
     std::vector<RedundancyData> tmpList;
-    uint64_t* bb_ref = get_bb_ref(drcontext);
     int bb_num = _bb_idx;
     for(int i=0; i<=bb_num; ++i) {
         uint64_t total_num = bb_ref[i];

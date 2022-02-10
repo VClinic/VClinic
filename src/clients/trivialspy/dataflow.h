@@ -59,7 +59,8 @@ struct DFGNode {
     DFGNode(int i, instr_t *instr) {
       idx = i;
       ins = instr;
-      is_copy = instr_is_copy(instr) || instr_is_convert(instr);
+      // convert is not a copy as non-zero fp may result in zero int value
+      is_copy = instr_is_copy(instr); // || instr_is_convert(instr);
       cost = estimate_cost(instr);
       principle = 0;
       info_idx = -1;
@@ -223,7 +224,6 @@ DFG::~DFG() {
 #ifdef DEBUG_TRIVIALSPY
     dr_fprintf(STDOUT, "Free DFG: %p\n", this);
 #endif
-    void* drcontext = dr_get_current_drcontext();
     for(auto it=entries.begin(); it!=entries.end(); ++it) {
         DR_ASSERT(*it!=NULL);
         for(auto cit=(*it)->children.begin(); cit<(*it)->children.end(); ++cit) {
@@ -487,39 +487,6 @@ void DFG::forward_analysis() {
         track_reg_simd[i] = &entry_node;
     }
     for(auto it=entries.begin(); it!=entries.end(); ++it) {
-        // if((func_entry=TrivialFuncTable::getTrivialFuncTableEntry((*it)->ins))!=-1) {
-        //     // get condlist
-        //     ConditionList_t** func_condlist;
-        //     bool success = TrivialFuncTable::getTrivialConditionList(func_entry, &func_condlist);
-        //     assert(success && "TrivialFuncTable::getTrivialConditionList Failed!\n");
-        //     // get return value of this function call
-        //     reg_id_t reg_def = TrivialFuncTable::getReturnRegister(func_entry);
-        //     // get input register list of this function call
-        //     const std::vector<reg_id_t>& reg_inputs = TrivialFuncTable::getInputRegisterList(func_entry);
-        //     for(size_t i=0; i<reg_inputs.size(); ++i) {
-        //         DFGNode* p;
-        //         reg_id_t reg_use = reg_inputs[i];
-        //         GET_TRACKED_REG_NODE(reg_use, p);
-        //         DR_ASSERT_MSG(p!=NULL, "Trivial Function inputs should be GPR or SIMD Registers!");
-        //         ADD_EDGE(edge, opnd_create_reg(reg_use), p, *it);
-        //         // lookup and set the condition list of the edge
-        //         memcpy(&(edge->info), &(func_condlist[i]->first), sizeof(ConditionListInfo_t));
-        //         edge->condlist.push_back(
-        //             {func_condlist[i]->second[0].val,
-        //              func_condlist[i]->second[0].attr,
-        //              opnd_create_reg(reg_def),
-        //              OPND_CREATE_INT8(0) /*placeholder, not used*/,
-        //              OPND_CREATE_INT8(0) /*placeholder, not used*/,
-        //              func_condlist[i]->second[0].res,
-        //              false});
-        //         if(func_condlist[i]->second[0].attr==Never) {
-        //             DR_ASSERT(func_condlist[i]->second[0].res==INVALID);
-        //         }
-        //     }
-        //     // dst edges
-        //     TRACK_REG(reg_def, *it);
-        //     continue;
-        // }
         // handle non-call operations
         int num_srcs = instr_num_srcs((*it)->ins);
         for(int i=0; i<num_srcs; ++i) {
@@ -610,7 +577,6 @@ DFG::DFG(instrlist_t* bb) {
     // 1) allocate all nodes with control flow
     int func_entry;
     int idx = 0;
-    void* drcontext = dr_get_current_drcontext();
     for (instr_t* instr = instrlist_first(bb); instr != NULL; instr = instr_get_next(instr)) {
         if(!instr_is_app(instr)) continue;
         // TODO: continue DFG construction if jump target is statically known

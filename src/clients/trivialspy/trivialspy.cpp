@@ -73,9 +73,18 @@ file_t gFile;
 
 vtrace_buffer_t* trace_buffer;
 
+struct sidefunc_args_t {
+    per_thread_log_t pt;
+    file_t out;
+    uint64_t* bb_ref;
+    bool ready;
+    bool clean;
+};
+
 struct per_thread_out_file_t {
     STCList* stc_list;
     file_t out_file;
+    sidefunc_args_t* args;
 };
 
 #define HEAVY_THRESHOLD 5
@@ -94,12 +103,14 @@ void trace_buf_full_cb(void *buf_base, void *buf_end, void* user_data) {
     cache_t* cache_end = (cache_t*)buf_end;
     int bidx = cache_ptr->bidx;
     int stc_idx;
-    std::vector<bool> stc_bmap;
-    stc_bmap.resize(global_log_space.dfg_logs[bidx].n_stc, 0);
     per_thread_log_t *pt = (per_thread_log_t *)drmgr_get_tls_field(dr_get_current_drcontext(), global_log_space.tls_idx);
+    // use preserved stc_bmap to avoid frequent heavy memory allocations.
+    std::vector<bool>& stc_bmap = *(pt->stc_bmap);
     int32_t cct;
     int n = 0;
     int stc_n = global_log_space.dfg_logs[bidx].n_stc;
+    stc_bmap.clear();
+    stc_bmap.resize(stc_n, 0);
     for(; cache_ptr<cache_end; ++cache_ptr, ++n) {
         // extract data from cache
         cct = cache_ptr->cct;
@@ -360,6 +371,25 @@ ThreadOutputFileInit(per_thread_out_file_t *pt)
     DR_ASSERT(pt->out_file != INVALID_FILE);
 }
 
+void threadSideWork(void* args) {
+    sidefunc_args_t* data = (sidefunc_args_t*)args;
+    dr_fprintf(STDOUT, "[TrivialSpy] Running Side Work Helper Thread for Thread %d\n", data->pt.threadId);
+    while(!data->ready) dr_sleep(100);
+    dr_fprintf(STDOUT, "[TrivialSpy] Generate Profile Report for Thread %d\n", data->pt.threadId);
+    generateThreadReport(&(data->pt), data->bb_ref, data->out, gFile, HEAVY_THRESHOLD, MAX_PRINT);
+    accumulateGlobalMetric(&(data->pt));
+    dr_close_file(data->out);
+
+    dr_fprintf(STDOUT, "[TrivialSpy] Cleaning for Thread %d\n", data->pt.threadId);
+    data->ready = false;
+    TrivialLoggerThreadFini_impl(&(data->pt), data->bb_ref);
+
+    dr_fprintf(STDOUT, "[TrivialSpy] Exit Side Work Helper Thread for Thread %d\n", data->pt.threadId);
+    data->clean = true;
+}
+
+std::vector<sidefunc_args_t*> arg_list;
+
 static void
 ClientThreadStart(void *drcontext)
 {
@@ -373,6 +403,16 @@ ClientThreadStart(void *drcontext)
         drmgr_set_tls_field(drcontext, tls_idx, (void *)pt);
         // init output files
         ThreadOutputFileInit(pt);
+        
+        pt->args = (sidefunc_args_t*)dr_global_alloc(sizeof(sidefunc_args_t));
+        per_thread_log_t *log_pt = (per_thread_log_t *)drmgr_get_tls_field(drcontext, global_log_space.tls_idx);
+        memcpy(&(pt->args->pt), log_pt, sizeof(per_thread_log_t));
+        pt->args->ready = false;
+        pt->args->clean = false;
+        pt->args->out = pt->out_file;
+        pt->args->bb_ref = get_bb_ref(drcontext);
+        arg_list.push_back(pt->args);
+        //dr_create_client_thread(threadSideWork, (void*)pt->args);
     }
 }
 
@@ -382,22 +422,28 @@ ClientThreadEnd(void *drcontext)
 #ifdef DEBUG_TRIVIALSPY
     dr_fprintf(STDOUT, "[TRIVIALSPY DEBUG] ClientThreadEnd triggered\n");
 #endif
-    // TODO: dump compressed binary profiles for GUI presentation
     if (!op_no_trace.get_value()) {
         per_thread_out_file_t *pt = (per_thread_out_file_t *)drmgr_get_tls_field(drcontext, tls_idx);
-        generateThreadReport(drcontext, pt->out_file, gFile, HEAVY_THRESHOLD, MAX_PRINT);
-        // if(op_enable_soft.get_value()) {
-        //     generateThreadSoftApproxReport(pt->out_file, global_log_space.soft_approx_metrics);
-        // }
-        // if(op_enable_hard.get_value()) {
-        //     generateThreadHardApproxReport(pt->out_file, global_log_space.hard_approx_metrics);
-        // }
-
-        accumulateGlobalMetric(drcontext);
-        dr_close_file(pt->out_file);
+        pt->args->ready = true;
+        threadSideWork((void*)pt->args);
         dr_thread_free(drcontext, pt, sizeof(per_thread_out_file_t));
     }
-    TrivialLoggerThreadFini(drcontext);
+    // TODO: dump compressed binary profiles for GUI presentation
+    // if (!op_no_trace.get_value()) {
+    //     per_thread_out_file_t *pt = (per_thread_out_file_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    //     // generateThreadReport(drcontext, pt->out_file, gFile, HEAVY_THRESHOLD, MAX_PRINT);
+    //     // if(op_enable_soft.get_value()) {
+    //     //     generateThreadSoftApproxReport(pt->out_file, global_log_space.soft_approx_metrics);
+    //     // }
+    //     // if(op_enable_hard.get_value()) {
+    //     //     generateThreadHardApproxReport(pt->out_file, global_log_space.hard_approx_metrics);
+    //     // }
+
+    //     //accumulateGlobalMetric(drcontext);
+    //     // dr_close_file(pt->out_file);
+    //     dr_thread_free(drcontext, pt, sizeof(per_thread_out_file_t));
+    // }
+    TrivialLoggerThreadFini(drcontext, !op_no_trace.get_value());
 #ifdef DEBUG_TRIVIALSPY
     dr_fprintf(STDOUT, "[TRIVIALSPY DEBUG] ClientThreadEnd exit\n");
 #endif
@@ -509,6 +555,11 @@ ClientExit(void)
 {
     // TODO: dump compressed binary profiles for GUI presentation
     if (!op_no_trace.get_value()) {
+        dr_fprintf(STDOUT, "Waiting for reporting threads...\n");
+        for(size_t i=0; i<arg_list.size(); ++i) {
+            while(arg_list[i]->ready) dr_sleep(100);
+        }
+        dr_fprintf(STDOUT, "Thread reporting all finished!\n");
         generateGlobalReport(gFile, op_enable_soft.get_value(), op_enable_hard.get_value());
     } else {
         dr_fprintf(gFile, "--- static dataflow info ---\n");
@@ -516,6 +567,15 @@ ClientExit(void)
     }
 
     dr_close_file(gFile);
+
+    if (!op_no_trace.get_value()) {
+        dr_fprintf(STDOUT, "Waiting for cleaning reporting threads...\n");
+        for(size_t i=0; i<arg_list.size(); ++i) {
+            while(!arg_list[i]->clean) dr_sleep(100);
+            dr_global_free(arg_list[i], sizeof(sidefunc_args_t));
+        }
+        dr_fprintf(STDOUT, "All helper threads cleaned!\n");
+    }
 
     TrivialLoggerFini();
     freeDFGList();

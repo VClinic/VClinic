@@ -72,6 +72,8 @@ bool propagateSTC_impl(std::list<DFGDirectedLink*>& trivial_edges, int threshold
 #endif
     while(!trivial_edges.empty()) {
         DFGDirectedLink* tce = trivial_edges.front();
+        DR_ASSERT(tce!=NULL);
+        DR_ASSERT(tce->target!=NULL);
         // propagate directly if the target instruction is copy
         if(tce->target->is_copy) {
             if(tce->target->parents.size()!=1) {
@@ -121,6 +123,7 @@ bool propagateSTC_impl(std::list<DFGDirectedLink*>& trivial_edges, int threshold
                 // Principle 3: mark the absorbing backward slices
                 if((*it).attr==Absorbing) {
                     for(auto pi=target->parents.begin(); pi!=target->parents.end(); ++pi) {
+                        DR_ASSERT((*pi)!=NULL);
                         if(opnd_same((*it).abs_opnd, (*pi)->opnd)) {
                             mark_backward((*pi)->source);
                         }
@@ -137,14 +140,17 @@ bool propagateSTC(DFGDirectedLink* stc, int threshold) {
 #ifdef DEBUG_TRIVIALSPY
     dr_fprintf(STDOUT, "[TRIVIALSPY DEBUG] enter propagateSTC\n");
 #endif
+    DR_ASSERT(stc!=NULL);
     ResultVal_t val = stc->val;
     opnd_t stc_opnd = stc->opnd;
     DFGNode* root = stc->source;
+    DR_ASSERT(root!=NULL);
     std::list<DFGDirectedLink*> trivial_edges;
     if(root->ins!=NULL && root->is_copy) {
         // this opnd is loaded by the source instruction from memory
         DR_ASSERT(root->parents.size()==1);
         DFGDirectedLink* stc_mem = root->parents[0];
+        DR_ASSERT(stc_mem!=NULL);
         if(opnd_is_memory_reference(stc_mem->opnd)) {
             stc = stc_mem;
             stc->val = val;
@@ -154,6 +160,7 @@ bool propagateSTC(DFGDirectedLink* stc, int threshold) {
     }
     stc->isSingular = true;
     for(auto it=root->children.begin(); it!=root->children.end(); ++it) {
+        DR_ASSERT((*it)!=NULL);
         if(opnd_same(stc_opnd,(*it)->opnd)) {
             (*it)->val = val;
             trivial_edges.push_back(*it);
@@ -397,9 +404,12 @@ bool discoverTrivialBreakPoints(DFGDirectedLink* stc, ConditionResult& ci, break
 void discoverSTC(int bb_idx, DFG* dfg, STCList* stc_list, int threshold, int max_cval_num) {
     breakpoint_list_t break_pt;
     std::list<SingularTrivialCondition> stc_breakpts;
+    DR_ASSERT(dfg!=NULL);
+    DR_ASSERT(stc_list!=NULL);
     stc_list->clear();
     for(auto it=dfg->edges.begin(); it!=dfg->edges.end(); ++it) {
         DFGDirectedLink* stc = *it;
+        DR_ASSERT(stc!=NULL);
         for(auto ci=stc->condlist.begin(); ci!=stc->condlist.end(); ++ci) {
             // only try to propagate when it is not propagated from the previous STC
             if(!(*ci).propagated && (*ci).result!=INVALID) {
@@ -448,11 +458,13 @@ void discoverSTC(int bb_idx, DFG* dfg, STCList* stc_list, int threshold, int max
         for(int j=i+1; j<n; ++j) {
             DR_ASSERT(stc_list_ref[i].cond != stc_list_ref[j].cond ||
                       stc_list_ref[i].stc != stc_list_ref[j].stc);
+#ifdef FATAL_WHEN_NOT_CRITICAL
             DR_ASSERT(stc_list_ref[i].cond != stc_list_ref[j].cond ||
                       stc_list_ref[i].stc->source !=
                           stc_list_ref[j].stc->source ||
                       !opnd_same(stc_list_ref[i].stc->opnd,
                                  stc_list_ref[j].stc->opnd));
+#endif
         }
         if(i>0) {
             // ensure the control flow consistency

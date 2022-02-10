@@ -80,6 +80,7 @@ typedef std::unordered_map<int32_t/*cct*/, func_log_t> TrivialFuncMap;
 struct per_thread_log_t {
     byte* seg_base;
     TrivialCCTMap* stc_counter;
+    std::vector<bool>* stc_bmap;
     TrivialFuncMap* trivial_func_tmap;
     int threadId;
     uint64_t total_cost;
@@ -103,14 +104,18 @@ static uint64_t* get_bb_ref(void* drcontext) {
     return (uint64_t*)BUF_PTR(pt->seg_base, global_log_space.tls_offs);
 }
 
-static void update_global_bb_ref_from_tls(void* drcontext) {
-    per_thread_log_t *pt = (per_thread_log_t *)drmgr_get_tls_field(drcontext, global_log_space.tls_idx);
-    uint64_t* bb_ref = (uint64_t*)BUF_PTR(pt->seg_base, global_log_space.tls_offs);
+static void update_global_bb_ref(uint64_t* bb_ref) {
     for(int i=0; i<MAX_DFGLOG_NUM; ++i) {
         if(bb_ref[i]) {
             __sync_fetch_and_add(&global_log_space.bb_ref[i], bb_ref[i]);
         }
     }
+}
+
+static void update_global_bb_ref_from_tls(void* drcontext) {
+    per_thread_log_t *pt = (per_thread_log_t *)drmgr_get_tls_field(drcontext, global_log_space.tls_idx);
+    uint64_t* bb_ref = (uint64_t*)BUF_PTR(pt->seg_base, global_log_space.tls_offs);
+    update_global_bb_ref(bb_ref);
 }
 
 // aflag-free instrumentation for bb counting
@@ -241,8 +246,8 @@ void init_trivial_func_list() {
 }
 
 static inline __attribute__((always_inline))
-void TrivialLoggerGenerateDFGSummaryCache(void* drcontext, int threshold) {
-    per_thread_log_t *pt = (per_thread_log_t *)drmgr_get_tls_field(drcontext, global_log_space.tls_idx);
+void TrivialLoggerGenerateDFGSummaryCache(per_thread_log_t *pt, uint64_t* bb_ref, int threshold) {
+    //per_thread_log_t *pt = (per_thread_log_t *)drmgr_get_tls_field(drcontext, global_log_space.tls_idx);
     DR_ASSERT(pt->stc_counter!=NULL);
     pt->total_cost = 0;
     pt->SB = 0;
@@ -269,7 +274,6 @@ void TrivialLoggerGenerateDFGSummaryCache(void* drcontext, int threshold) {
             pt->combined += dfg_s->benifit*trivial_num;
         }
     }
-    uint64_t* bb_ref = get_bb_ref(drcontext);
     // lock the global space for updating DFGSummary cache
     dr_mutex_lock(global_log_space.gLock);
     for(int i=0; i<=_bb_idx; ++i) {
@@ -355,9 +359,12 @@ void TrivialLoggerThreadInit(void* drcontext, bool enable_approx_soft, bool enab
     pt->total_cost = 0;
     if(!no_trace) {
         pt->stc_counter = new TrivialCCTMap[MAX_DFGLOG_NUM];
+        pt->stc_bmap = new std::vector<bool>();
+        pt->stc_bmap->reserve(128);
         pt->trivial_func_tmap = new TrivialFuncMap();
     } else {
         pt->stc_counter = NULL;
+        pt->stc_bmap = NULL;
         pt->trivial_func_tmap = NULL;
     }
     pt->seg_base = (byte*)dr_get_dr_segment_base(global_log_space.tls_seg);
@@ -369,16 +376,26 @@ void TrivialLoggerThreadInit(void* drcontext, bool enable_approx_soft, bool enab
 }
 
 static inline __attribute__((always_inline))
-void TrivialLoggerThreadFini(void* drcontext) {
-    per_thread_log_t *pt = (per_thread_log_t *)drmgr_get_tls_field(drcontext, global_log_space.tls_idx);
+void TrivialLoggerThreadFini_impl(per_thread_log_t *pt, uint64_t* bb_ref) {
     if(pt->stc_counter) {
         delete[] pt->stc_counter;
         delete pt->trivial_func_tmap;
     }
-    void* bb_ref = BUF_PTR(pt->seg_base, global_log_space.tls_offs);
+    if(pt->stc_bmap) {
+        delete pt->stc_bmap;
+    }
     if(bb_ref) {
-        update_global_bb_ref_from_tls(drcontext);
+        update_global_bb_ref(bb_ref);
         dr_raw_mem_free(bb_ref, MAX_DFGLOG_NUM*sizeof(uint64_t));
+    }
+}
+
+static inline __attribute__((always_inline))
+void TrivialLoggerThreadFini(void* drcontext, bool external_fini) {
+    per_thread_log_t *pt = (per_thread_log_t *)drmgr_get_tls_field(drcontext, global_log_space.tls_idx);
+    if(!external_fini) {
+        void* bb_ref = BUF_PTR(pt->seg_base, global_log_space.tls_offs);
+        TrivialLoggerThreadFini_impl(pt, (uint64_t*)bb_ref);
     }
     // free thread data
     dr_thread_free(drcontext, pt, sizeof(per_thread_log_t));
@@ -391,8 +408,8 @@ int getThreadId() {
 }
 
 static inline __attribute__((always_inline))
-void accumulateGlobalMetric(void* drcontext) {
-    per_thread_log_t *pt = (per_thread_log_t *)drmgr_get_tls_field(drcontext, global_log_space.tls_idx);
+void accumulateGlobalMetric(per_thread_log_t *pt) {
+    // per_thread_log_t *pt = (per_thread_log_t *)drmgr_get_tls_field(drcontext, global_log_space.tls_idx);
     __sync_fetch_and_add(&global_log_space.totalCost, pt->total_cost);
 }
 
