@@ -122,8 +122,15 @@ bool LOADSPY_FILTER_MEM_ACCESS_INSTR(instr_t *instr) {
  ************************************************/
 // Each memory byte M has a shadow byte to hold its previous value prevValue
 // To maintain the context for a read operation, we store an additional pointer sized variable CONTEXT(M) (actually uint32_t) in the shadow memory for each memory byte M.
-ConcurrentShadowMemory<uint32_t> *ctxt_sm;
-ConcurrentShadowMemory<uint8_t> *val_sm;
+typedef struct _mem_node_t {
+    uint32_t ctxt;
+    uint8_t value;
+} mem_node_t;
+
+ConcurrentShadowMemory<mem_node_t> *mem_map;
+
+// ConcurrentShadowMemory<uint32_t> *ctxt_sm;
+// ConcurrentShadowMemory<uint8_t> *val_sm;
 
 ////////////////////////////////////////////////
 
@@ -194,37 +201,36 @@ static inline void AddToApproximateRedTable(uint64_t key,  uint16_t value, per_t
 /***************************************************************************************/
 /*********************** memory temporal redundancy functions **************************/
 /***************************************************************************************/
-
 template<int start, int end, int incr, bool conditional, bool approx>
 struct UnrolledLoop{
     static __attribute__((always_inline)) void Body(function<void (const int)> func){
         func(start); // Real loop body
         UnrolledLoop<start+incr, end, incr, conditional, approx>:: Body(func);   // unroll next iteration
     }
-    static __attribute__((always_inline)) void BodySamePage(context_handle_t * __restrict__ prevIP, const context_handle_t handle, per_thread_t *pt){
+    static __attribute__((always_inline)) void BodySamePage(mem_node_t* mem_node, const context_handle_t handle, per_thread_t *pt){
         if(conditional) {
             // report in RedTable
             if(approx)
-                AddToApproximateRedTable(MAKE_CONTEXT_PAIR(prevIP[start], handle), 1, pt);
+                AddToApproximateRedTable(MAKE_CONTEXT_PAIR(mem_node[start].ctxt, handle), 1, pt);
             else
-                AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[start], handle), 1, pt);
+                AddToRedTable(MAKE_CONTEXT_PAIR(mem_node[start].ctxt, handle), 1, pt);
         }
         // Update context
-        prevIP[start] = handle;
-        UnrolledLoop<start+incr, end, incr, conditional, approx>:: BodySamePage(prevIP, handle, pt);   // unroll next iteration
+        mem_node[start].ctxt = handle;
+        UnrolledLoop<start+incr, end, incr, conditional, approx>:: BodySamePage(mem_node, handle, pt);   // unroll next iteration
     }
     static __attribute__((always_inline)) void BodyStraddlePage(uint64_t addr, const context_handle_t handle, per_thread_t *pt){
-        context_handle_t *prevIP = (context_handle_t *)ctxt_sm->GetOrCreateShadowAddress((size_t)addr+start);
+        mem_node_t* mem_node = (mem_node_t *)mem_map->GetOrCreateShadowAddress((size_t)addr+start);
         
         if (conditional) {
             // report in RedTable
             if(approx)
-                AddToApproximateRedTable(MAKE_CONTEXT_PAIR(prevIP[0 /* 0 is correct*/ ], handle), 1, pt);
+                AddToApproximateRedTable(MAKE_CONTEXT_PAIR(mem_node->ctxt, handle), 1, pt);
             else
-                AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0 /* 0 is correct*/ ], handle), 1, pt);
+                AddToRedTable(MAKE_CONTEXT_PAIR(mem_node->ctxt, handle), 1, pt);
         }
         // Update context
-        prevIP[0] = handle;
+        mem_node->ctxt = handle;
         UnrolledLoop<start+incr, end, incr, conditional, approx>:: BodyStraddlePage(addr, handle, pt);   // unroll next iteration
     }
 };
@@ -232,7 +238,7 @@ struct UnrolledLoop{
 template<int end,  int incr, bool conditional, bool approx>
 struct UnrolledLoop<end , end , incr, conditional, approx>{
     static __attribute__((always_inline)) void Body(function<void (const int)> func){}
-    static __attribute__((always_inline)) void BodySamePage(context_handle_t * __restrict__ prevIP, const context_handle_t handle, per_thread_t *pt){}
+    static __attribute__((always_inline)) void BodySamePage(mem_node_t* mem_node, const context_handle_t handle, per_thread_t *pt){}
     static __attribute__((always_inline)) void BodyStraddlePage(uint64_t addr, const context_handle_t handle, per_thread_t *pt){}
 };
 
@@ -241,8 +247,8 @@ struct UnrolledConjunction{
     static __attribute__((always_inline)) bool Body(function<bool (const int)> func){
         return func(start) && UnrolledConjunction<start+incr, end, incr>:: Body(func);   // unroll next iteration
     }
-    static __attribute__((always_inline)) bool BodyContextCheck(context_handle_t * __restrict__ prevIP){
-        return (prevIP[0] == prevIP[start]) && UnrolledConjunction<start+incr, end, incr>:: BodyContextCheck(prevIP);   // unroll next iteration
+    static __attribute__((always_inline)) bool BodyContextCheck(mem_node_t* mem_node){
+        return (mem_node[0].ctxt == mem_node[start].ctxt) && UnrolledConjunction<start+incr, end, incr>:: BodyContextCheck(mem_node);   // unroll next iteration
     }
 };
 
@@ -251,7 +257,7 @@ struct UnrolledConjunction<end , end , incr>{
     static __attribute__((always_inline)) bool Body(function<void (const int)> func){
         return true;
     }
-    static __attribute__((always_inline)) bool BodyContextCheck(context_handle_t * __restrict__ prevIP){
+    static __attribute__((always_inline)) bool BodyContextCheck(mem_node_t* mem_node){
         return true;
     }
 };
@@ -262,33 +268,20 @@ struct UnrolledSubLoop {
         return func(start) && UnrolledSubLoop<start + incr, end, incr, T, isApprox>::Body(func);   // unroll next iteration
     }
 
-    static __attribute__((always_inline)) bool BodyISRed(void *addr, uint8_t *prev) {
+    static __attribute__((always_inline)) bool BodyISRed(void *addr, mem_node_t* mem_node) {
         bool isRed = false;
-        if (isApprox) {
-            T oldValue = reinterpret_cast<const T *> (prev)[start];
-            T newValue = reinterpret_cast<const T *> (addr)[start];
-            T rate = (newValue - oldValue) / oldValue;
-            isRed = (rate <= delta && rate >= -delta);
-        } else {
-            isRed = (reinterpret_cast<const T *> (prev)[start] == reinterpret_cast<const T *> (addr)[start]);
-        }
+        
+        isRed = (reinterpret_cast<const T> (mem_node[start].value) == reinterpret_cast<const T *> (addr)[start]);
 
         return isRed &&
-               UnrolledSubLoop<start + incr, end, incr, T, isApprox>::BodyISRed(addr, prev);   // unroll next iteration
+               UnrolledSubLoop<start + incr, end, incr, T, isApprox>::BodyISRed(addr, mem_node);   // unroll next iteration
     }
 
     static __attribute__((always_inline)) bool BodyStraddleISRed(void *addr, void *val) {
         bool isRed = false;
-        uint8_t *prev = (uint8_t *)val_sm->GetOrCreateShadowAddress((size_t)addr+start);
+        mem_node_t* mem_node = (mem_node_t *)mem_map->GetOrCreateShadowAddress((size_t)addr+start);
 
-        if (isApprox) {
-            T oldValue = reinterpret_cast<const T *> (prev)[0];
-            T newValue = reinterpret_cast<const T *> (val)[start];
-            T rate = (newValue - oldValue) / oldValue;
-            isRed = (rate <= delta && rate >= -delta);
-        } else {
-            isRed = (reinterpret_cast<const T *> (prev)[0] == reinterpret_cast<const T *> (val)[start]);
-        }
+        isRed = (reinterpret_cast<const T> (mem_node[0].value) == reinterpret_cast<const T *> (val)[start]);
 
         return isRed &&
                UnrolledSubLoop<start + incr, end, incr, T, isApprox>::BodyStraddleISRed(addr, val);   // unroll next iteration
@@ -298,10 +291,11 @@ struct UnrolledSubLoop {
 template<int end, int incr, class T, bool isApprox>
 struct UnrolledSubLoop<end, end, incr, T, isApprox> {
     static __attribute__((always_inline)) bool Body(function<bool (const int)> func){ return true;}
-    static __attribute__((always_inline)) bool BodyISRed(void *addr, uint8_t *prev) { return true; }
+    static __attribute__((always_inline)) bool BodyISRed(void *addr, mem_node_t* mem_node) { return true; }
     static __attribute__((always_inline)) bool BodyStraddleISRed(void *addr, void *val) { return true; }
 };
 
+//T换成uint8即可
 template<int start, int end, int incr, class T>
 struct UnrolledCopy {
     static __attribute__((always_inline)) void Body(function<void(const int)> func) {
@@ -309,15 +303,15 @@ struct UnrolledCopy {
         UnrolledCopy<start + incr, end, incr, T>::Body(func);   // unroll next iteration
     }
 
-    static __attribute__((always_inline)) void BodyCopy(void *addr, uint8_t *prev) {
-        *((T *) (prev + start)) = *(static_cast<T *>(addr) + start);
-        UnrolledCopy<start + incr, end, incr, T>::BodyCopy(addr, prev);   // unroll next iteration
+    static __attribute__((always_inline)) void BodyCopy(void *addr, mem_node_t* mem_node) {
+        mem_node[start].value = *(static_cast<T *>(addr) + start);
+        UnrolledCopy<start + incr, end, incr, T>::BodyCopy(addr, mem_node);   // unroll next iteration
     }
 
     static __attribute__((always_inline)) void BodyStraddleCopy(void *addr, void *val) {
-        uint8_t *prev = (uint8_t *)val_sm->GetOrCreateShadowAddress((size_t)addr+start);
+        mem_node_t* mem_node = (mem_node_t *)mem_map->GetOrCreateShadowAddress((size_t)addr+start);
 
-        *((T *) (prev)) = *(static_cast<T *>(val) + start);
+        mem_node->value = *(static_cast<T *>(val) + start);
         UnrolledCopy<start + incr, end, incr, T>::BodyStraddleCopy(addr, val);   // unroll next iteration
     }
 };
@@ -325,54 +319,188 @@ struct UnrolledCopy {
 template<int end, int incr, class T>
 struct UnrolledCopy<end, end, incr, T> {
     static __attribute__((always_inline)) void Body(function<void(const int)> func) {}
-    static __attribute__((always_inline)) void BodyCopy(void *addr, uint8_t *prev) {}
+    static __attribute__((always_inline)) void BodyCopy(void *addr, mem_node_t* mem_node) {}
     static __attribute__((always_inline)) void BodyStraddleCopy(void *addr, void *val) {}
 };
+
+// template<int start, int end, int incr, bool conditional, bool approx>
+// struct UnrolledLoop{
+//     static __attribute__((always_inline)) void Body(function<void (const int)> func){
+//         func(start); // Real loop body
+//         UnrolledLoop<start+incr, end, incr, conditional, approx>:: Body(func);   // unroll next iteration
+//     }
+//     static __attribute__((always_inline)) void BodySamePage(context_handle_t * __restrict__ prevIP, const context_handle_t handle, per_thread_t *pt){
+//         if(conditional) {
+//             // report in RedTable
+//             if(approx)
+//                 AddToApproximateRedTable(MAKE_CONTEXT_PAIR(prevIP[start], handle), 1, pt);
+//             else
+//                 AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[start], handle), 1, pt);
+//         }
+//         // Update context
+//         prevIP[start] = handle;
+//         UnrolledLoop<start+incr, end, incr, conditional, approx>:: BodySamePage(prevIP, handle, pt);   // unroll next iteration
+//     }
+//     static __attribute__((always_inline)) void BodyStraddlePage(uint64_t addr, const context_handle_t handle, per_thread_t *pt){
+//         mem_node_t* mem_node = (mem_node_t *)mem_map->GetOrCreateShadowAddress((size_t)addr+start);
+//         // context_handle_t *prevIP = (context_handle_t *)ctxt_sm->GetOrCreateShadowAddress((size_t)addr+start);
+        
+//         if (conditional) {
+//             // report in RedTable
+//             if(approx)
+//                 AddToApproximateRedTable(MAKE_CONTEXT_PAIR(mem_node->prevIP[0 /* 0 is correct*/ ], handle), 1, pt);
+//             else
+//                 AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0 /* 0 is correct*/ ], handle), 1, pt);
+//         }
+//         // Update context
+//         prevIP[0] = handle;
+//         UnrolledLoop<start+incr, end, incr, conditional, approx>:: BodyStraddlePage(addr, handle, pt);   // unroll next iteration
+//     }
+// };
+
+// template<int end,  int incr, bool conditional, bool approx>
+// struct UnrolledLoop<end , end , incr, conditional, approx>{
+//     static __attribute__((always_inline)) void Body(function<void (const int)> func){}
+//     static __attribute__((always_inline)) void BodySamePage(context_handle_t * __restrict__ prevIP, const context_handle_t handle, per_thread_t *pt){}
+//     static __attribute__((always_inline)) void BodyStraddlePage(uint64_t addr, const context_handle_t handle, per_thread_t *pt){}
+// };
+
+// template<int start, int end, int incr>
+// struct UnrolledConjunction{
+//     static __attribute__((always_inline)) bool Body(function<bool (const int)> func){
+//         return func(start) && UnrolledConjunction<start+incr, end, incr>:: Body(func);   // unroll next iteration
+//     }
+//     static __attribute__((always_inline)) bool BodyContextCheck(context_handle_t * __restrict__ prevIP){
+//         return (prevIP[0] == prevIP[start]) && UnrolledConjunction<start+incr, end, incr>:: BodyContextCheck(prevIP);   // unroll next iteration
+//     }
+// };
+
+// template<int end,  int incr>
+// struct UnrolledConjunction<end , end , incr>{
+//     static __attribute__((always_inline)) bool Body(function<void (const int)> func){
+//         return true;
+//     }
+//     static __attribute__((always_inline)) bool BodyContextCheck(context_handle_t * __restrict__ prevIP){
+//         return true;
+//     }
+// };
+
+// template<int start, int end, int incr, class T, bool isApprox>
+// struct UnrolledSubLoop {
+//     static __attribute__((always_inline)) bool Body(function<bool (const int)> func){
+//         return func(start) && UnrolledSubLoop<start + incr, end, incr, T, isApprox>::Body(func);   // unroll next iteration
+//     }
+
+//     static __attribute__((always_inline)) bool BodyISRed(void *addr, uint8_t *prev) {
+//         bool isRed = false;
+//         if (isApprox) {
+//             T oldValue = reinterpret_cast<const T *> (prev)[start];
+//             T newValue = reinterpret_cast<const T *> (addr)[start];
+//             T rate = (newValue - oldValue) / oldValue;
+//             isRed = (rate <= delta && rate >= -delta);
+//         } else {
+//             isRed = (reinterpret_cast<const T *> (prev)[start] == reinterpret_cast<const T *> (addr)[start]);
+//         }
+
+//         return isRed &&
+//                UnrolledSubLoop<start + incr, end, incr, T, isApprox>::BodyISRed(addr, prev);   // unroll next iteration
+//     }
+
+//     static __attribute__((always_inline)) bool BodyStraddleISRed(void *addr, void *val) {
+//         bool isRed = false;
+//         uint8_t *prev = (uint8_t *)val_sm->GetOrCreateShadowAddress((size_t)addr+start);
+
+//         if (isApprox) {
+//             T oldValue = reinterpret_cast<const T *> (prev)[0];
+//             T newValue = reinterpret_cast<const T *> (val)[start];
+//             T rate = (newValue - oldValue) / oldValue;
+//             isRed = (rate <= delta && rate >= -delta);
+//         } else {
+//             isRed = (reinterpret_cast<const T *> (prev)[0] == reinterpret_cast<const T *> (val)[start]);
+//         }
+
+//         return isRed &&
+//                UnrolledSubLoop<start + incr, end, incr, T, isApprox>::BodyStraddleISRed(addr, val);   // unroll next iteration
+//     }
+// };
+
+// template<int end, int incr, class T, bool isApprox>
+// struct UnrolledSubLoop<end, end, incr, T, isApprox> {
+//     static __attribute__((always_inline)) bool Body(function<bool (const int)> func){ return true;}
+//     static __attribute__((always_inline)) bool BodyISRed(void *addr, uint8_t *prev) { return true; }
+//     static __attribute__((always_inline)) bool BodyStraddleISRed(void *addr, void *val) { return true; }
+// };
+
+// template<int start, int end, int incr, class T>
+// struct UnrolledCopy {
+//     static __attribute__((always_inline)) void Body(function<void(const int)> func) {
+//         func(start);
+//         UnrolledCopy<start + incr, end, incr, T>::Body(func);   // unroll next iteration
+//     }
+
+//     static __attribute__((always_inline)) void BodyCopy(void *addr, uint8_t *prev) {
+//         *((T *) (prev + start)) = *(static_cast<T *>(addr) + start);
+//         UnrolledCopy<start + incr, end, incr, T>::BodyCopy(addr, prev);   // unroll next iteration
+//     }
+
+//     static __attribute__((always_inline)) void BodyStraddleCopy(void *addr, void *val) {
+//         uint8_t *prev = (uint8_t *)val_sm->GetOrCreateShadowAddress((size_t)addr+start);
+
+//         *((T *) (prev)) = *(static_cast<T *>(val) + start);
+//         UnrolledCopy<start + incr, end, incr, T>::BodyStraddleCopy(addr, val);   // unroll next iteration
+//     }
+// };
+
+// template<int end, int incr, class T>
+// struct UnrolledCopy<end, end, incr, T> {
+//     static __attribute__((always_inline)) void Body(function<void(const int)> func) {}
+//     static __attribute__((always_inline)) void BodyCopy(void *addr, uint8_t *prev) {}
+//     static __attribute__((always_inline)) void BodyStraddleCopy(void *addr, void *val) {}
+// };
 
 template<class T, uint32_t AccessLen, bool isApprox>
 struct RedSpyAnalysis{
 
-        static __attribute__((always_inline)) void CheckNByteValueAfterRead(uint64_t addr, uint8_t *val, uint32_t curCtxtHandle, per_thread_t *pt){
-        context_handle_t * __restrict__ prevIP = (context_handle_t *)ctxt_sm->GetOrCreateShadowAddress((size_t)addr);
-        uint8_t* prevValue = val_sm->GetOrCreateShadowAddress((size_t)addr);
+        static __attribute__((always_inline)) void CheckNByteValueAfterRead(void* addr, uint8_t *val, uint32_t curCtxtHandle, per_thread_t *pt){
+        mem_node_t* mem_node = (mem_node_t *)mem_map->GetOrCreateShadowAddress((size_t)addr);
         
         // bool isRedundantRead = IsReadRedundant((void*)val, prevValue);
         bool isRedundantRead = false;
         
         const bool isAccessWithinPageBoundary = IS_ACCESS_WITHIN_PAGE_BOUNDARY( (uint64_t)addr, AccessLen);
         if(isAccessWithinPageBoundary) {
-            isRedundantRead = UnrolledSubLoop<0, AccessLen/sizeof(T), 1, T, isApprox>::BodyISRed((void*)val, prevValue);
-            UnrolledCopy<0, AccessLen/sizeof(T), 1, T>::BodyCopy((void*)val, prevValue);
+            isRedundantRead = UnrolledSubLoop<0, AccessLen, 1, uint8_t, isApprox>::BodyISRed((void*)val, mem_node);
+            UnrolledCopy<0, AccessLen, 1, uint8_t>::BodyCopy((void*)val, mem_node);
         } else {
-            isRedundantRead = UnrolledSubLoop<0, AccessLen/sizeof(T), 1, T, isApprox>::BodyStraddleISRed((void*)addr, (void*)val);
-            UnrolledCopy<0, AccessLen/sizeof(T), 1, T>::BodyStraddleCopy((void*)addr, (void*)val);
+            isRedundantRead = UnrolledSubLoop<0, AccessLen, 1, uint8_t, isApprox>::BodyStraddleISRed((void*)addr, (void*)val);
+            UnrolledCopy<0, AccessLen, 1, uint8_t>::BodyStraddleCopy((void*)addr, (void*)val);
         }
 
         if(isRedundantRead) {
             // detected redundancy
             if(isAccessWithinPageBoundary) {
                 // All from same ctxt?
-                if (UnrolledConjunction<0, AccessLen, 1>::BodyContextCheck(prevIP)) {
+                if (UnrolledConjunction<0, AccessLen, 1>::BodyContextCheck(mem_node)) {
                     // report in RedTable
                     if(isApprox)
-                        AddToApproximateRedTable(MAKE_CONTEXT_PAIR(prevIP[0], curCtxtHandle), AccessLen, pt);
+                        AddToApproximateRedTable(MAKE_CONTEXT_PAIR(mem_node[0].ctxt, curCtxtHandle), AccessLen, pt);
                     else
-                        AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], curCtxtHandle), AccessLen, pt);
+                        AddToRedTable(MAKE_CONTEXT_PAIR(mem_node[0].ctxt, curCtxtHandle), AccessLen, pt);
                     // Update context
-                    UnrolledLoop<0, AccessLen, 1, false, /* redundancy is updated outside*/ isApprox>::BodySamePage(prevIP, curCtxtHandle, pt);
+                    UnrolledLoop<0, AccessLen, 1, false, /* redundancy is updated outside*/ isApprox>::BodySamePage(mem_node, curCtxtHandle, pt);
                 } else {
                     // different contexts
-                    UnrolledLoop<0, AccessLen, 1, true, /* redundancy is updated inside*/ isApprox>::BodySamePage(prevIP, curCtxtHandle, pt);
+                    UnrolledLoop<0, AccessLen, 1, true, /* redundancy is updated inside*/ isApprox>::BodySamePage(mem_node, curCtxtHandle, pt);
                 }
             } else {
                 // Read across a 64-K page boundary
                 // First byte is on this page though
                 if(isApprox)
-                    AddToApproximateRedTable(MAKE_CONTEXT_PAIR(prevIP[0], curCtxtHandle), 1, pt);
+                    AddToApproximateRedTable(MAKE_CONTEXT_PAIR(mem_node[0].ctxt, curCtxtHandle), 1, pt);
                 else
-                    AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[0], curCtxtHandle), 1, pt);
+                    AddToRedTable(MAKE_CONTEXT_PAIR(mem_node[0].ctxt, curCtxtHandle), 1, pt);
                 // Update context
-                prevIP[0] = curCtxtHandle;
+                mem_node[0].ctxt = curCtxtHandle;
                 
                 // Remaining bytes [1..AccessLen] somewhere will across a 64-K page boundary
                 UnrolledLoop<1, AccessLen, 1, true, /* update redundancy */ isApprox>::BodyStraddlePage( (uint64_t) addr, curCtxtHandle, pt);
@@ -382,11 +510,11 @@ struct RedSpyAnalysis{
             // Just update contexts
             if(isAccessWithinPageBoundary) {
                 // Update context
-                UnrolledLoop<0, AccessLen, 1, false, /* not redundant*/ isApprox>::BodySamePage(prevIP, curCtxtHandle, pt);
+                UnrolledLoop<0, AccessLen, 1, false, /* not redundant*/ isApprox>::BodySamePage(mem_node, curCtxtHandle, pt);
             } else {
                 // Read across a 64-K page boundary
                 // Update context
-                prevIP[0] = curCtxtHandle;
+                mem_node[0].ctxt = curCtxtHandle;
                 
                 // Remaining bytes [1..AccessLen] somewhere will across a 64-K page boundary
                 UnrolledLoop<1, AccessLen, 1, false, /* not redundant*/ isApprox>::BodyStraddlePage( (uint64_t) addr, curCtxtHandle, pt);
@@ -396,37 +524,37 @@ struct RedSpyAnalysis{
 };
 
 
-static inline void CheckAfterLargeRead(uint64_t addr, uint8_t *val, uint32_t accessLen, uint32_t curCtxtHandle, per_thread_t *pt){
-    context_handle_t * __restrict__ prevIP = (context_handle_t *)ctxt_sm->GetOrCreateShadowAddress((size_t)addr);
-    uint8_t* prevValue = val_sm->GetOrCreateShadowAddress((size_t)addr);
+// static inline void CheckAfterLargeRead(void* addr, uint8_t *val, uint32_t accessLen, uint32_t curCtxtHandle, per_thread_t *pt){
+//     context_handle_t * __restrict__ prevIP = (context_handle_t *)ctxt_sm->GetOrCreateShadowAddress((size_t)addr);
+//     uint8_t* prevValue = val_sm->GetOrCreateShadowAddress((size_t)addr);
     
-    // This assumes that a large read cannot straddle a page boundary -- strong assumption, but lets go with it for now.
-    // tuple<uint8_t[SHADOW_PAGE_SIZE], context_handle_t[SHADOW_PAGE_SIZE]> &tt = sm.GetOrCreateShadowBaseAddress((uint64_t)addr);
-    if(memcmp(prevValue, (void*)val, accessLen) == 0){
-        // redundant
-        for(uint32_t index = 0 ; index < accessLen; index++){
-            // report in RedTable
-            AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[index], curCtxtHandle), 1, pt);
-            // Update context
-            prevIP[index] = curCtxtHandle;
-        }
-    }else{
-        // Not redundant
-        for(uint32_t index = 0 ; index < accessLen; index++){
-            // Update context
-            prevIP[index] = curCtxtHandle;
-        }
-    }
-    // update prevValue
-    memcpy(prevValue,(void*)val,accessLen);
-}
+//     // This assumes that a large read cannot straddle a page boundary -- strong assumption, but lets go with it for now.
+//     // tuple<uint8_t[SHADOW_PAGE_SIZE], context_handle_t[SHADOW_PAGE_SIZE]> &tt = sm.GetOrCreateShadowBaseAddress((uint64_t)addr);
+//     if(memcmp(prevValue, (void*)val, accessLen) == 0){
+//         // redundant
+//         for(uint32_t index = 0 ; index < accessLen; index++){
+//             // report in RedTable
+//             AddToRedTable(MAKE_CONTEXT_PAIR(prevIP[index], curCtxtHandle), 1, pt);
+//             // Update context
+//             prevIP[index] = curCtxtHandle;
+//         }
+//     }else{
+//         // Not redundant
+//         for(uint32_t index = 0 ; index < accessLen; index++){
+//             // Update context
+//             prevIP[index] = curCtxtHandle;
+//         }
+//     }
+//     // update prevValue
+//     memcpy(prevValue,(void*)val,accessLen);
+// }
 
 // cache_t_ctxt_no_info
 void trace_update_cb(val_info_t *info) {
     bool is_float = info->is_float;
     int esize = info->esize;
     int size = info->size;
-    uint64_t addr = info->addr;
+    void* addr = (void*)info->addr;
     int32_t cct = info->ctxt_hndl;
     uint32_t type = info->type;
     uint8_t *val = (uint8_t*)info->val;
@@ -495,7 +623,7 @@ void trace_update_cb(val_info_t *info) {
                         default: RedSpyAnalysis<uint8_t, 64, false>::CheckNByteValueAfterRead(addr, val, cct, pt); break;
                     }
                 }break;
-                default: CheckAfterLargeRead(addr, val, size, cct, pt); break;
+                default: /*CheckAfterLargeRead(addr, val, size, cct, pt);*/ break;
             }
         }
         pt->bytesLoad += size;
@@ -777,8 +905,9 @@ ClientExit(void)
     dr_fprintf(gTraceFile, "\nRedundantBytesLoad: %lu %.2f\n",grandTotBytesRedLoad, grandTotBytesRedLoad * 100.0/grandTotBytesLoad);
     dr_fprintf(gTraceFile, "\nApproxRedundantBytesLoad: %lu %.2f\n",grandTotBytesApproxRedLoad, grandTotBytesApproxRedLoad * 100.0/grandTotBytesLoad);
 
-    delete ctxt_sm;
-    delete val_sm;
+    delete mem_map;
+    // delete ctxt_sm;
+    // delete val_sm;
     dr_close_file(gTraceFile);
     // if(KnobTopN.get_value())
     //     topnStream.close();
@@ -809,8 +938,9 @@ static void ClientInit(int argc, const char* argv[]) {
         dr_abort();
     }
 
-    ctxt_sm = new ConcurrentShadowMemory<uint32_t>();
-    val_sm = new ConcurrentShadowMemory<uint8_t>();
+    mem_map = new ConcurrentShadowMemory<mem_node_t>();
+    // ctxt_sm = new ConcurrentShadowMemory<uint32_t>();
+    // val_sm = new ConcurrentShadowMemory<uint8_t>();
     // Create output file
     #ifdef ARM_CCTLIB
     char name[MAX_FILE_PATH] = "arm-";
@@ -899,4 +1029,3 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
 #ifdef __cplusplus
 }
 #endif
-
