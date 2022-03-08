@@ -698,11 +698,18 @@ InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, int slot
                 opnd_t opnd = instr_get_dst(instr, j);
                 if(opnd_size_in_bytes(opnd_get_size(opnd)) == 0) continue;
                 uint32_t opmask = getOpndMask<true, true>(instr, opnd);
+                if(TEST_FLAG(trace->trace_flag, VPROFILE_TRACE_STRICTLY_ORDERED)) {
+                    vtrace_buffer_t* buf = trace->buff;
+                    if(!(*(bool (*)(opnd_t, vprofile_src_t))buf->user_data_fill_num)(opnd, (vprofile_src_t)opmask)) {
+                        continue;
+                    }
+                }
                 if(FILTER_OPND_MASK(trace->opnd_mask, opmask)) {
                     instrument_opnd<with_cct>(drcontext, bb, instr, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch, true, opmask);
                 }
             }
         }
+        if(!FILTER_OPND_MASK(trace->opnd_mask, READ)) continue;
         num = instr_num_srcs(instr);
         for(int j=0; j<num; ++j) {
             opnd_t opnd = instr_get_src(instr, j);
@@ -746,6 +753,7 @@ InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, int slot
         // for each trace registered by user, we need to call func in vtrace to trace value.
         for (i = 0; i < vtrace_t_list.entries; ++i) {
             vtrace_t *trace = (vtrace_t*)drvector_get_entry(&vtrace_t_list, i);
+            if(!FILTER_OPND_MASK(trace->opnd_mask, WRITE)) continue;
             num = instr_num_dsts(instr);
             for(int j=0; j<num; ++j) {
                 opnd_t opnd = instr_get_dst(instr, j);
@@ -1846,10 +1854,12 @@ bool vprofile_init(bool (*filter)(instr_t *),
 
 void vprofile_exit()
 {
+#ifdef X86
     drmgr_unregister_thread_init_event(ClientThreadStart);
     drmgr_unregister_thread_exit_event(ClientThreadEnd);
     drmgr_unregister_tls_field(tls_idx);
     dr_raw_tls_cfree(tls_offs, INSTRACE_TLS_COUNT);
+#endif
 
 #ifdef VPROFILE_DEBUG
     LOG_FINI();

@@ -30,7 +30,8 @@
 #include "drreg.h"
 #include "drutil.h"
 #include "drcctlib.h"
-#include "shadow_memory.h"
+// #include "shadow_memory.h"
+#include "shadow_memory_lock.h"
 #include "drcctlib_hpcviewer_format.h"
 #include "dr_tools.h"
 #include "vprofile.h"
@@ -237,7 +238,7 @@ typedef struct _per_thread_t {
 
 file_t gTraceFile;
 string g_folder_name;
-static void *gLock;
+// static void *gLock;
 
 // for metric logging
 int redspy_metric_id = 0;
@@ -1128,8 +1129,10 @@ void trace_update_cb(val_info_t *info) {
     int esize = info->esize;
     bool is_float = info->is_float;
 
+    // skip unknown ins's op
+    if(esize == 0) return;
+
     if((TEST_OPND_MASK(type, GPR_REGISTER) || TEST_OPND_MASK(type, SIMD_REGISTER))) {
-        if(!TEST_OPND_MASK(type, AFTER)) return;
         pt->bytesWritten += size;
         InstrumentReg(size, esize, is_float, addr, val, cct, pt);
     } else {

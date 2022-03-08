@@ -22,7 +22,8 @@
 #include "drreg.h"
 #include "drutil.h"
 #include "drcctlib.h"
-#include "shadow_memory.h"
+// #include "shadow_memory.h"
+#include "shadow_memory_lock.h"
 #include "dr_tools.h"
 #include "vprofile.h"
 using namespace std;
@@ -141,7 +142,10 @@ static droption_t<bool> KnobTopN
 
 bool 
 VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
-    uint32_t user_mask = (ANY_DATA_TYPE | MEMORY | READ | BEFORE | WRITE | AFTER);
+    // uint32_t user_mask1 = (ANY_DATA_TYPE | MEMORY | READ | BEFORE);
+    // uint32_t user_mask2 = (ANY_DATA_TYPE | MEMORY | WRITE | AFTER);
+    // return ((user_mask1 & opmask) == opmask) || ((user_mask2 & opmask) == opmask);
+    uint32_t user_mask = (ANY_DATA_TYPE | MEMORY | READ | WRITE | BEFORE);
     return ((user_mask & opmask) == opmask);
 }
 
@@ -170,7 +174,7 @@ FILE* statsFile;
 #endif //end GATHER_STATS
 
 // global metrics
-static void *gLock;
+// static void *gLock;
 uint64_t grandTotBytesWrites = 0;
 uint64_t gTotalDead = 0;
 #ifdef MULTI_THREADED
@@ -587,12 +591,13 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
 
     dr_register_exit_event(ClientExit);
 
-    uint32_t trace_flag = VPROFILE_TRACE_CCT_ADDR | VPROFILE_TRACE_STRICTLY_ORDERED;
+    // maybe we can set trace before write!
+    uint32_t trace_flag = (VPROFILE_TRACE_CCT_ADDR | VPROFILE_TRACE_STRICTLY_ORDERED | VPROFILE_TRACE_BEFORE_WRITE);
 
     vtrace = vprofile_allocate_trace(trace_flag);
 
     // We only interest in memory loads
-    uint32_t opnd_mask = (ANY_DATA_TYPE | MEMORY | READ | BEFORE | WRITE | AFTER);
+    uint32_t opnd_mask = (ANY_DATA_TYPE | MEMORY | READ | BEFORE | WRITE /*| AFTER*/);
 
     // Tracing Buffer
     vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, ANY, trace_update_cb);

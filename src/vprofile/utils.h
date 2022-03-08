@@ -430,6 +430,8 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
     case OP_rcpps:
 
     /* AVX */
+    case OP_vcvtsd2ss://?
+    
     case OP_vucomiss:
     case OP_vcomiss:
     case OP_vmovmskps:
@@ -468,8 +470,10 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
     case OP_vtestps:
         return 4;
 
-    case OP_cvtdq2pd:
+    case OP_cvtdq2pd://?
     case OP_vcvtsi2sd://?
+    case OP_vcvtss2sd://?
+
     case OP_sqrtpd:
     case OP_maxpd:
     case OP_cmppd:
@@ -610,6 +614,7 @@ IntegerOperandSizeTable(instr_t *instr, opnd_t opnd)
 	    case OP_paddb:
         case OP_psubb:
         case OP_pminub:
+        case OP_pshufb:
             return 1;
 
         case OP_punpcklwd:
@@ -625,6 +630,8 @@ IntegerOperandSizeTable(instr_t *instr, opnd_t opnd)
         case OP_pmuludq:
         case OP_pcmpgtd:
         case OP_pslld:
+        case OP_psrld:
+        case OP_psrad:
         case OP_pcmpeqd:
         case OP_punpckldq:
         case OP_pshufd:
@@ -642,7 +649,9 @@ IntegerOperandSizeTable(instr_t *instr, opnd_t opnd)
         case OP_pxor:
         case OP_por:
         case OP_punpcklqdq:
+        case OP_punpckhqdq:
         case OP_paddq:
+        case OP_psubq:
             return 8;
 
         case OP_vpslldq:

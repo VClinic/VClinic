@@ -31,7 +31,8 @@
 #include "drreg.h"
 #include "drutil.h"
 #include "drcctlib.h"
-#include "shadow_memory.h"
+// #include "shadow_memory.h"
+#include "shadow_memory_lock.h"
 #include "drcctlib_hpcviewer_format.h"
 #include "dr_tools.h"
 #include "vprofile.h"
@@ -176,7 +177,7 @@ static uint tls_offs;
 
 file_t gTraceFile;
 string g_folder_name;
-static void *gLock;
+// static void *gLock;
 
 static inline void AddToRedTable(uint64_t key,  uint16_t value, per_thread_t* pt) __attribute__((always_inline,flatten));
 static inline void AddToRedTable(uint64_t key,  uint16_t value, per_thread_t* pt) {
