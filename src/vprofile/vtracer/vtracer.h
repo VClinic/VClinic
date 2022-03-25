@@ -70,7 +70,7 @@ vtrace_buffer_t *vtracer_create_trace_buffer(uint buffer_size);
  * @param fill_num_cb: the callback to register which will be called during
  * analysis phase to obtain how many slots (elements) will be filled in for the
  * given instruction.
- * @param user_data_full: the user-specified data for the fill_num_cb callbacks.
+ * @param user_data_fill_num: the user-specified data for the fill_num_cb callbacks.
  * This registered user_data will send as the user_data parameter of fill_num_cb
  * callback.
  * May only be NULL when @see full_cb is NULL; otherwise assert for usage error.
@@ -152,7 +152,7 @@ void vtracer_get_trace_buffer_in_reg(void *drcontext, instr_t *where,
  * case, VTracer will not insert instrumetations to update trace buffer
  * pointers.
  * @param reg_ptr: the register to hold the value of current buffer pointer. It
- * will hold new forwarded buffer pointer if vtrace_buffer is NULL; otherwise
+ * will hold new forwarded buffer pointer if vtrace_buffer is not NULL; otherwise
  * its return value is undefined.
  * @param scratch: free scratch register given by caller. its return value is
  * undefined.
@@ -214,7 +214,7 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
  * @param offset: offsets to the target domain of a value trace slot.
  * 
  * In general, this function will insert codes equivilant to:
- *      <reg_ptr>.<offset> = val
+ *      <reg_ptr>.<offset> = <val>
  * Instrumentation is inserted before @param where.
  * */
 template <typename T>
