@@ -733,7 +733,9 @@ bool instr_is_floating(instr_t* instr) {
                     }
                 }
             } else {
+#ifdef DEBUG
                 dr_fprintf(STDERR, "??? Non register dst operand!\n");
+#endif
             }
         }
     }

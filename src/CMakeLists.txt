@@ -86,7 +86,7 @@ add_subdirectory(drwrap)
 add_subdirectory(drreg)
 # TODO i#4134: ARM not yet supported.
 if (X86)
-  add_subdirectory(drbbdup)
+    add_subdirectory(drbbdup)
 endif (X86)
 add_subdirectory(drsyms)
 add_subdirectory(drutil)

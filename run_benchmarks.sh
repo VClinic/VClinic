@@ -1,5 +1,11 @@
 #!/bin/bash
 set -e
+IS_ARM=0
+if test ! -z "$(lscpu | grep aarch64)"; then
+  IS_ARM=1
+fi
+echo IS_ARM=$IS_ARM
+
 ROOT_DIR=`pwd`
 mkdir -p run && cd run
 echo "Downloading NPB 3.4.2 benchmarks ..."
@@ -18,52 +24,61 @@ do
 done
 
 echo "Collecting for runtime and memory overheads"
-mkdir -p run/ && cd run/
+date=`date +%y%m%d%H%M%S`
+mkdir -p run-$date/ && cd run-$date/
 
-EXE=$ROOT_DIR/build/bin64/drrun
+DRRUN=$ROOT_DIR/build/bin64/drrun
 PROFILE="python2 $ROOT_DIR/mem_overhead.py"
 toy_tools_relax="vprofile_mem_and_reg vprofile_mem_and_reg_read vprofile_memory vprofile_memory_read"
 toy_tools_strict="vprofile_mem_and_reg_sd vprofile_mem_and_reg_read_sd vprofile_memory_sd vprofile_memory_read_sd"
 client_tools="loadspy zerospy deadspy redspy"
 
 TNUM=14
+if IS_ARM==1; then
+  TNUM=32
+fi
 
 for b in $BENCH
 do
   echo "Running $b ..."
-  numactl --cpubind=0 $PROFILE ori-$TNUM- echo ./$b.C.x
+  EXE="../bin/$b.C.x"
+  numactl --cpubind=0 $PROFILE ori-$TNUM- $EXE > ori.stdout.log
   for tool in $toy_tools_relax
   do
     echo "Running $b with toy tool $tool ..."
-    numactl --cpubind=0 $PROFILE vclinic-$TNUM- $EXE -t $tool -- echo ./$b.C.x
+    numactl --cpubind=0 $PROFILE vclinic-$TNUM- $DRRUN -t $tool -- $EXE > toy.stdout.log
   done
 
   for tool in $toy_tools_strict
   do
     echo "Running $b with toy tool $tool ..."
-    numactl --cpubind=0 $PROFILE vclinic-$TNUM- $EXE -t $tool -- echo ./$b.C.x
+    numactl --cpubind=0 $PROFILE vclinic-$TNUM- $DRRUN -t $tool -- $EXE > toy.stdout.log
   done
 
   for tool in $client_tools
   do
     echo "Running $b with client tool $tool ..."
-    numactl --cpubind=0 $PROFILE vclinic-$TNUM- $EXE -t $tool -- echo ./$b.C.x
+    numactl --cpubind=0 $PROFILE vclinic-$TNUM- $DRRUN -t $tool -- $EXE > $tool.stdout.log
   done
 done
 
 echo "Collecting scalability data"
 scale="8 4 2 1"
+if IS_ARM==1; then
+  scale="16 8 4 2 1"
+fi
 for i in $scale
 do
   export OMP_NUM_THREADS=$i
   for b in $BENCH
   do
+    EXE="../bin/$b.C.x"
     echo "Running $b with $i threads ..."
-    numactl --cpubind=0 $PROFILE ori-$i- echo ./$b.C.x
+    numactl --cpubind=0 $PROFILE ori-$i- $EXE > ori.stdout.log
     for tool in $toy_tools_relax
     do
       echo "Running $b ($i) with toy tool $tool ..."
-      numactl --cpubind=0 $PROFILE vclinic-$i- $EXE -t $tool -- echo ./$b.C.x
+      numactl --cpubind=0 $PROFILE vclinic-$i- $DRRUN -t $tool -- $EXE > toy.stdout.log
     done
   done
   unset OMP_NUM_THREADS

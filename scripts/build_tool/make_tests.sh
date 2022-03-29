@@ -80,15 +80,27 @@ $DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t zerospy -- /bin/ls > /dev/null &&
     echo -e "\033[32m----------PASSED---------\033[0m" ||
         (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
 
-echo -e "\033[32m----------Test 4 (deadspy tool single thread)---------\033[0m"
+echo -e "\033[32m----------Test 4 (loadspy tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t loadspy -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+echo -e "\033[32m----------Test 5 (deadspy tool single thread)---------\033[0m"
 $DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t deadspy -- /bin/ls > /dev/null &&
     echo -e "\033[32m----------PASSED---------\033[0m" ||
         (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
 
-echo -e "\033[32m----------Test 5 (trivialspy tool single thread)---------\033[0m"
+echo -e "\033[32m----------Test 6 (redspy tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t redspy -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+if [[ "$IS_X86" == "true" ]]; then
+echo -e "\033[32m----------Test 7 (trivialspy tool single thread)---------\033[0m"
 $DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t trivialspy -- /bin/ls > /dev/null &&
     echo -e "\033[32m----------PASSED---------\033[0m" ||
         (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+fi
 
 echo -e "\033[32m*************************************************\033[0m"
 echo -e "\033[32m************* ALL TESTS Finished ****************\033[0m"
