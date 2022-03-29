@@ -1,0 +1,20 @@
+--- config/make.def.template	2019-02-08 03:28:43.000000000 +0800
++++ config/make.def	2022-03-25 11:07:29.047046342 +0800
+@@ -46,7 +46,7 @@
+ #---------------------------------------------------------------------------
+ # Global *compile time* flags for Fortran programs
+ #---------------------------------------------------------------------------
+-FFLAGS	= -O3 -fopenmp
++FFLAGS	= -O3 -fopenmp -g
+ 
+ #---------------------------------------------------------------------------
+ # Global *link time* flags. Flags for increasing maximum executable 
+@@ -104,7 +104,7 @@
+ # _LARGEFILE64_SOURCE - are standard compiler flags which allow to work with 
+ # files larger than 2GB.
+ #---------------------------------------------------------------------------
+-CFLAGS	= -O3 -fopenmp
++CFLAGS	= -O3 -fopenmp -g
+ 
+ #---------------------------------------------------------------------------
+ # Global *link time* flags. Flags for increasing maximum executable 
