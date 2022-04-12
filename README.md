@@ -1,5 +1,7 @@
 # VClinic
 
+[![DOI](https://zenodo.org/badge/475342521.svg)](https://zenodo.org/badge/latestdoi/475342521)
+
 A portable and efficient infrastracture for value profilers. The document for API and developing a new tool client is described in [here](https://vclinic.readthedocs.io/en/latest/index.html).
 
 ## Pre-request
