@@ -36,7 +36,10 @@ cd VClinic
 We use Nas Parallel Benchmark (NPB 3.4.2) for evaluating the capability as well as the runtime and memory overheads of VClinic. For simplicity, we provide a script to run all the benchmarks with built-in example tools and collect the execution time and peak memory.
 
 ```
-./run_benchmark.sh
+# evaluate time and memory overheads for all benchmarks and tools
+./run_benchmarks.sh
+# evaluate scalabilities
+./run_benchmarks_scale.sh
 ```
 
 During execution, the script will automatically download the NPB 3.4.2 benchmarks and compile for evaluation. After data collection, the raw data is located in `NPB-3.4.2/NPB3.4-OMP/run-<date>/`.

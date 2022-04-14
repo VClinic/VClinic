@@ -36,41 +36,26 @@ toy_tools_relax="vprofile_mem_and_reg vprofile_mem_and_reg_read vprofile_memory 
 toy_tools_strict="vprofile_mem_and_reg_sd vprofile_mem_and_reg_read_sd vprofile_memory_sd vprofile_memory_read_sd"
 client_tools="loadspy zerospy deadspy redspy"
 
-TNUM=14
+echo "Collecting scalability data"
+scale="8 4 2 1"
 if [ "$IS_ARM" = "1" ]; then
-  TNUM=32
+  scale="16 8 4 2 1"
 fi
-
-echo thread number=$TNUM
-
-for b in $BENCH
+for i in $scale
 do
-  echo "Running $b ..."
-  EXE="../bin/$b.C.x"
-  numactl --cpubind=0 $PROFILE ori-$TNUM- $EXE >> ori.stdout.log
-  for tool in $toy_tools_relax
+  export OMP_NUM_THREADS=$i
+  for b in $BENCH
   do
-    echo "Running $b with toy tool $tool ..."
-    numactl --cpubind=0 $PROFILE vclinic-$TNUM- $DRRUN -max_bb_instrs 40 -t $tool -- $EXE >> toy.stdout.log
+    EXE="../bin/$b.C.x"
+    echo "Running $b with $i threads ..."
+    numactl --cpubind=0 $PROFILE ori-$i- $EXE > ori.stdout.log
+    for tool in $toy_tools_relax
+    do
+      echo "Running $b ($i) with toy tool $tool ..."
+      numactl --cpubind=0 $PROFILE vclinic-$i- $DRRUN -max_bb_instrs 40 -t $tool -- $EXE > toy.stdout.log
+    done
   done
-
-  for tool in $toy_tools_strict
-  do
-    echo "Running $b with toy tool $tool ..."
-    numactl --cpubind=0 $PROFILE vclinic-$TNUM- $DRRUN -max_bb_instrs 40 -t $tool -- $EXE >> toy.stdout.log
-  done
-
-  mkdir -p $b && cd $b
-  for tool in $client_tools
-  do
-    echo "Running $b with client tool $tool ..."
-    if [ "$tool" = "redspy" ]; then
-      numactl --cpubind=0 $PROFILE ../vclinic-$TNUM- $DRRUN -max_bb_instrs 40 -t $tool -- $EXE > $tool.stdout.log
-    else
-      numactl --cpubind=0 $PROFILE ../vclinic-$TNUM- $DRRUN -t $tool -- $EXE > $tool.stdout.log
-    fi
-  done
-  cd ..
+  unset OMP_NUM_THREADS
 done
 
-echo "Finish collecting VClinic data! The collected data is located in `pwd`"
+echo "Finish collecting VClinic Scalability data! The collected data is located in `pwd`"
