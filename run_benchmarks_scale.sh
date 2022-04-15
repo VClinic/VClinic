@@ -7,24 +7,12 @@ fi
 echo IS_ARM=$IS_ARM
 
 ROOT_DIR=`pwd`
-#mkdir -p run && cd run
-#echo "Downloading NPB 3.4.2 benchmarks ..."
-#wget https://www.nas.nasa.gov/assets/npb/NPB3.4.2.tar.gz
-#tar xvzf NPB3.4.2.tar.gz
-
-#echo "Building NPB-OMP..."
-cd run/NPB3.4.2/NPB3.4-OMP/
-#patch ./config/make.def.template -i $ROOT_DIR/scripts/bench_tool/NPB3.4-OMP.make.patch -o ./config/make.def
+BENCH_DIR=run/NPB3.4.2/NPB3.4-OMP/
+cd $BENCH_DIR
 
 BENCH="bt cg ep ft is lu mg sp ua"
 
-#for b in $BENCH
-#do
-#  make CLASS=C $b
-#done
-
 echo "Collecting for runtime and memory overheads"
-#date=`date +%y%m%d%H%M%S`
 mkdir -p run-VClinic/ && cd run-VClinic/
 
 DRRUN="$ROOT_DIR/build/bin64/drrun"
