@@ -4,6 +4,12 @@
 
 A portable and efficient infrastracture for value profilers. The document for API and developing a new tool client is described in [here](https://vclinic.readthedocs.io/en/latest/index.html).
 
+## Pre-built Dockers
+
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7311322.svg)](https://doi.org/10.5281/zenodo.7311322)
+
+One can access to our publicly available docker images for X86 and ARM platforms on [zenodo](https://doi.org/10.5281/zenodo.7311322). For detailed usage of the docker images, please refer to the README attached with the image.
+
 ## Pre-request
 
 - Tested System: Ubuntu 20.04 LTS
