@@ -65,8 +65,43 @@ $DRRUN -- echo hi > /dev/null &&
     echo -e "\033[32m----------PASSED---------\033[0m" ||
         (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
 
-echo -e "\033[32m----------Test 1 (vprofile_all_opnd tool single thread)---------\033[0m"
+echo -e "\033[32m----------Test 1.1 (vprofile_all_opnd tool single thread)---------\033[0m"
 $DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t vprofile_all_opnd -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+echo -e "\033[32m----------Test 1.2 (vprofile_mem_and_reg tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t vprofile_mem_and_reg -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+echo -e "\033[32m----------Test 1.3 (vprofile_mem_and_reg_read tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t vprofile_mem_and_reg_read -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+echo -e "\033[32m----------Test 1.4 (vprofile_mem_and_reg_read_sd tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t vprofile_mem_and_reg_read_sd -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+echo -e "\033[32m----------Test 1.5 (vprofile_memory tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t vprofile_memory -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+echo -e "\033[32m----------Test 1.6 (vprofile_memory_read tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t vprofile_memory_read -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+echo -e "\033[32m----------Test 1.7 (vprofile_memory_read_sd tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t vprofile_memory -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+echo -e "\033[32m----------Test 1.8 (vprofile_memory_sd tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t vprofile_memory_sd -- /bin/ls > /dev/null &&
     echo -e "\033[32m----------PASSED---------\033[0m" ||
         (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
 
@@ -87,6 +122,16 @@ $DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t deadspy -- /bin/ls > /dev/null &&
 
 echo -e "\033[32m----------Test 5 (trivialspy tool single thread)---------\033[0m"
 $DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t trivialspy -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+echo -e "\033[32m----------Test 6 (redspy tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t redspy -- /bin/ls > /dev/null &&
+    echo -e "\033[32m----------PASSED---------\033[0m" ||
+        (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
+
+echo -e "\033[32m----------Test 7 (loadspy tool single thread)---------\033[0m"
+$DRRUN $DEBUG_FLAG $ARM_SPECIAL_FLAG -t deadspy -- /bin/ls > /dev/null &&
     echo -e "\033[32m----------PASSED---------\033[0m" ||
         (echo -e "\033[31m----------FAILED---------\033[0m"; exit -1)
 

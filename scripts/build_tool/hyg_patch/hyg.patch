@@ -1,0 +1,11 @@
+69a70,74
+> /* HYGON processors:  ebx:edx:ecx spell AuthenticAMD */
+> #define HYG_EBX /* Auth */ 0x6f677948
+> #define HYG_EDX /* enti */ 0x6e65476e
+> #define HYG_ECX /* cAMD */ 0x656e6975
+> 
+240a246,249
+>                       "unknown AMD processor type");
+>     } else if (res_ebx == HYG_EBX) {
+>         cpu_info.vendor = VENDOR_AMD;
+>         CLIENT_ASSERT(res_edx == HYG_EDX && res_ecx == HYG_ECX,

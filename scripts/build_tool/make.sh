@@ -82,6 +82,8 @@ if [ ${NEED_FIX} -eq 1 ] ; then
     $CUR_DIR/temp_solution/fix_build_error_9.sh $BUILD_PATH
 fi
 
+$CUR_DIR/hyg_patch/cpuid_patch.sh $CUR_DIR
+
 # start make
 echo -e "Running make .. (See \033[34m$MAKE_LOG_FILE\033[0m for detail)"
 make -j >$MAKE_LOG_FILE 2>&1 && echo -e "\033[32m Make successfully! \033[0m" || (echo -e "\033[31m Make fail! \033[0m"; exit -1)

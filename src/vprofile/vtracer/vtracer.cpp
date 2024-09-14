@@ -9,7 +9,7 @@
 
 #ifdef DEBUG
     #define VTRACER_DEBUG
-//    #define VTRACER_DEBUG_DETAIL
+    #define VTRACER_DEBUG_DETAIL
 #endif
 
 #define ALIGNED(x, alignment) ((((ptr_uint_t)x) & ((alignment)-1)) == 0)
@@ -824,10 +824,10 @@ vtrace_buf_insert_buf_store(void *drcontext, instrlist_t *ilist,
     VTRACER_LOG(SUMMARY, "exit vtrace_buf_insert_buf_store\n");
 }
 
-#ifdef VTRACER_DEBUG
+#ifdef VTRACER_DEBUG_DETAIL
 void debug_print(void* src, int offset) {
-    dr_fprintf(STDOUT, "src=%lx, offset=%d, mem=%p\n", src, offset, (uint8_t*)src+offset);
-    dr_fprintf(STDOUT, "         memval=%d\n", *((uint8_t*)((uint8_t*)src+offset)));
+    dr_fprintf(STDOUT, "DETAIL: src=%lx, offset=%d, mem=%p\n", src, offset, (uint8_t*)src+offset);
+    dr_fprintf(STDOUT, "DETAIL:          memval=%d\n", *((uint8_t*)((uint8_t*)src+offset)));
 }
 #endif
 
@@ -865,6 +865,21 @@ void insert_load(void *drcontext, instrlist_t *ilist, instr_t *where, reg_id_t d
     VTRACER_LOG(SUMMARY, "exit insert_load\n");
 }
 
+#ifdef VTRACER_DEBUG
+void debug_print_2(uint64_t addr, char* buf) {
+    dr_fprintf(STDERR, "mem addr=%lx, instr: %s\n", addr, buf);
+    fflush(stderr);
+}
+void debug_print_opnd(char* buf) {
+    dr_fprintf(STDERR, "Tracing OPND=%s\n", buf);
+    fflush(stderr);
+}
+void debug_print_pass() {
+    dr_fprintf(STDERR, "Passed\n");
+    fflush(stderr);
+}
+#endif
+
 template <int size>
 inline __attribute__((always_inline)) void
 insert_trace_value_in_mem(void *drcontext, instrlist_t *ilist, instr_t *where,
@@ -873,7 +888,15 @@ insert_trace_value_in_mem(void *drcontext, instrlist_t *ilist, instr_t *where,
   switch (size) {
   case 1: {
     reg_id_t reg_val = reg_resize_to_opsz(reg_addr, OPSZ_1);
+#ifdef VTRACER_DEBUG
+    char* buf = new char[50];
+    instr_disassemble_to_buffer(drcontext, where, buf, 50);
+    dr_insert_clean_call(drcontext, ilist, where, (void*)debug_print_2, false, 2, opnd_create_reg(reg_addr), OPND_CREATE_INTPTR(buf));
+#endif
     insert_load(drcontext, ilist, where, reg_val, reg_addr, 0, OPSZ_1);
+#ifdef VTRACER_DEBUG
+    dr_insert_clean_call(drcontext, ilist, where, (void*)debug_print_pass, false, 0);
+#endif
     vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr,
                                DR_REG_NULL, opnd_create_reg(reg_val), OPSZ_1,
                                offset);
@@ -922,22 +945,22 @@ insert_trace_value_in_mem(void *drcontext, instrlist_t *ilist, instr_t *where,
     reg_id_t scratch;
     RESERVE_REG(drcontext, ilist, where, NULL, scratch);
     // 0-7B
-    insert_load(drcontext, ilist, where, scratch, reg_addr, 0, OPSZ_8);
+    //insert_load(drcontext, ilist, where, scratch, reg_addr, 0, OPSZ_8);
     vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr,
                                DR_REG_NULL, opnd_create_reg(scratch), OPSZ_8,
                                offset);
     // 8-15B
-    insert_load(drcontext, ilist, where, scratch, reg_addr, 8, OPSZ_8);
+    //insert_load(drcontext, ilist, where, scratch, reg_addr, 8, OPSZ_8);
     vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr,
                                DR_REG_NULL, opnd_create_reg(scratch), OPSZ_8,
                                offset + 8);
     // 16-23B
-    insert_load(drcontext, ilist, where, scratch, reg_addr, 16, OPSZ_8);
+    //insert_load(drcontext, ilist, where, scratch, reg_addr, 16, OPSZ_8);
     vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr,
                                DR_REG_NULL, opnd_create_reg(scratch), OPSZ_8,
                                offset + 16);
     // 24-31B
-    insert_load(drcontext, ilist, where, scratch, reg_addr, 24, OPSZ_8);
+    //insert_load(drcontext, ilist, where, scratch, reg_addr, 24, OPSZ_8);
     vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr,
                                DR_REG_NULL, opnd_create_reg(scratch), OPSZ_8,
                                offset + 24);
@@ -1000,7 +1023,6 @@ void insert_trace_for_mem(void *drcontext, instrlist_t *ilist, instr_t *where, o
                           reg_id_t reg_ptr, reg_id_t scratch) {
   VTRACER_LOG(SUMMARY, "enter insert_trace_for_mem: size=%d\n", sz);
   reg_id_t free_reg;
-  
   // check if reg is dirty
   if (opnd_uses_reg(mem_opnd, reg_ptr)) {
         DR_ASSERT_MSG(0,
@@ -1023,6 +1045,11 @@ void insert_trace_for_mem(void *drcontext, instrlist_t *ilist, instr_t *where, o
     DR_ASSERT_MSG(0,
                 "insert_trace_for_mem drutil_insert_get_mem_addr failed!");
   }
+#ifdef VTRACER_DEBUG
+    char* buf = new char[50];
+    opnd_disassemble_to_buffer(drcontext, mem_opnd, buf, 50);
+    dr_insert_clean_call(drcontext, ilist, where, (void*)debug_print_opnd, false, 1, OPND_CREATE_INTPTR(buf));
+#endif
   // insert loads from the given memory and store into the buffered trace
   insert_trace_value_in_mem<sz>(drcontext, ilist, where, offset, 
                                 free_reg /*addr*/, reg_ptr /*ptr*/);
@@ -1368,19 +1395,40 @@ bool instr_is_ignorable(instr_t *ins) {
     int opc = instr_get_opcode(ins);
 #ifdef AARCH64
     if(instr_is_exclusive_load(ins) || instr_is_exclusive_store(ins)) {
-        return false;
+        return true;
     }
 #endif
+#ifdef X86
+    if(instr_is_xsave(ins)) {
+        return true;
+    }
+#endif
+    if(instr_is_rep_string_op(ins)) {
+        return true;
+    }
     switch (opc) {
         case OP_nop:
 #ifdef X86
 	    case OP_nop_modrm:
+        case OP_fxsave32:
+        case OP_fxsave64:
+        case OP_fxrstor32:
+        case OP_fxrstor64:
+        case OP_fldenv:
+        case OP_fnstenv:
+        case OP_fnsave:
+        case OP_fldcw:
+        case OP_fnstcw:
+        case OP_xrstor32:
+        case OP_xrstor64:
+
 #endif
 
 #if defined(AARCH64)
         case OP_isb:
         case OP_ld3:
         case OP_ld3r:
+
 #endif
                 return true;
         default:
