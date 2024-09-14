@@ -945,22 +945,22 @@ insert_trace_value_in_mem(void *drcontext, instrlist_t *ilist, instr_t *where,
     reg_id_t scratch;
     RESERVE_REG(drcontext, ilist, where, NULL, scratch);
     // 0-7B
-    //insert_load(drcontext, ilist, where, scratch, reg_addr, 0, OPSZ_8);
+    insert_load(drcontext, ilist, where, scratch, reg_addr, 0, OPSZ_8);
     vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr,
                                DR_REG_NULL, opnd_create_reg(scratch), OPSZ_8,
                                offset);
     // 8-15B
-    //insert_load(drcontext, ilist, where, scratch, reg_addr, 8, OPSZ_8);
+    insert_load(drcontext, ilist, where, scratch, reg_addr, 8, OPSZ_8);
     vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr,
                                DR_REG_NULL, opnd_create_reg(scratch), OPSZ_8,
                                offset + 8);
     // 16-23B
-    //insert_load(drcontext, ilist, where, scratch, reg_addr, 16, OPSZ_8);
+    insert_load(drcontext, ilist, where, scratch, reg_addr, 16, OPSZ_8);
     vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr,
                                DR_REG_NULL, opnd_create_reg(scratch), OPSZ_8,
                                offset + 16);
     // 24-31B
-    //insert_load(drcontext, ilist, where, scratch, reg_addr, 24, OPSZ_8);
+    insert_load(drcontext, ilist, where, scratch, reg_addr, 24, OPSZ_8);
     vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr,
                                DR_REG_NULL, opnd_create_reg(scratch), OPSZ_8,
                                offset + 24);
