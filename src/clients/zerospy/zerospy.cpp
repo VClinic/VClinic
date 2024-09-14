@@ -994,6 +994,18 @@ static uint64_t PrintRedundancyPairs(per_thread_t *pt, uint64_t threadBytesLoad,
 
             dr_fprintf(gTraceFile, "\n======= Redundant byte map : [0] ");
 
+            std::string redMap;
+            for(uint32_t i=0;i<(*listIt).accessLen;++i) {
+                if((*listIt).byteMap & (1<<i)) {
+                    dr_fprintf(gTraceFile, "00 ");
+                    redMap.append("00 ");
+                }
+                else {
+                    dr_fprintf(gTraceFile, "XX ");
+                    redMap.append("XX ");
+                }
+            }
+
             dr_fprintf(gTraceFile, " [AccessLen=%d] =======\n", (*listIt).accessLen);
 
             dr_fprintf(gTraceFile, "\n---------------------Redundant load with---------------------------\n");
