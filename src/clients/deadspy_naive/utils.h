@@ -200,17 +200,59 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
     }
 
     opnd_t width = instr_get_src(instr, instr_num_srcs(instr) - 1);
-    if (!opnd_is_immed_int(width)) return size;
+    if (!opnd_is_immed_int(width)) {
+        int opc = instr_get_opcode(instr);
+        switch (opc) {
+            // actual esize is decided by instr encode, should be ignore?
+            case OP_dup:
+            case OP_movi:
+            case OP_stp:
+            case OP_addp:
+            case OP_cmeq:
+            case OP_ld1:
+            case OP_orr:
+            case OP_and:
+            case OP_str:
+            case OP_stur:
+            case OP_ldp:
+            case OP_ldr:
+            case OP_ldur:
+            case OP_ld2:
+            case OP_uminv:
+                    return 8;
+            default: return 0;
+        }
+    }
 
     switch (opnd_get_immed_int(width)) {
-    case VECTOR_ELEM_WIDTH_HALF:
-        return 2;
-    case VECTOR_ELEM_WIDTH_SINGLE:
-        return 4;
-    case VECTOR_ELEM_WIDTH_DOUBLE:
-        return 8;
-    default:
-        return 0;
+        case VECTOR_ELEM_WIDTH_HALF:
+            return 2;
+        case VECTOR_ELEM_WIDTH_SINGLE:
+            return 4;
+        case VECTOR_ELEM_WIDTH_DOUBLE:
+            return 8;
+        default: {
+            int opc = instr_get_opcode(instr);
+            switch (opc) {
+                case OP_dup:
+                case OP_movi:
+                case OP_stp:
+                case OP_addp:
+                case OP_cmeq:
+                case OP_ld1:
+                case OP_orr:
+                case OP_and:
+                case OP_str:
+                case OP_stur:
+                case OP_ldp:
+                case OP_ldr:
+                case OP_ldur:
+                case OP_ld2:
+                case OP_uminv:
+                        return 8;
+                default: return 0;
+            }
+        }
     }
 }
 
@@ -222,12 +264,24 @@ IntegerOperandSizeTable(instr_t *instr, opnd_t opnd)
         return size;
     }
 
-    opnd_t width = instr_get_src(instr, instr_num_srcs(instr) - 1);
-    if (!opnd_is_immed_int(width)) return size;
-
     int opc = instr_get_opcode(instr);
 
     switch (opc) {
+        case OP_dup:
+        case OP_movi:
+        case OP_stp:
+        case OP_addp:
+        case OP_cmeq:
+        case OP_ld1:
+        case OP_orr:
+        case OP_and:
+        case OP_str:
+        case OP_stur:
+        case OP_ldp:
+        case OP_ldr:
+        case OP_ldur:
+        case OP_ld2:
+                return 8;
         default: {
             return 0;
         }
@@ -288,6 +342,10 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
         return 8;
         //return 16;
 
+    case OP_movss:
+    case OP_movups:
+    case OP_movaps:
+
     case OP_vmovss:
     case OP_vmovups:
     case OP_vmovlps:
@@ -310,11 +368,22 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
     case OP_vshufps:
         return 4;
 
+    case OP_subpd:
+    case OP_divpd:
+    case OP_movupd:
+    case OP_movsd:
+    case OP_andpd:
+    case OP_shufpd:
+    case OP_xorpd:
+    case OP_orpd:
+    case OP_andnpd:
+
     case OP_vmovsd:
     case OP_vmovupd:
     case OP_vmovlpd:
     case OP_vmovddup:
     case OP_vmovhpd:
+    case OP_movapd:
     case OP_vmovapd:
     case OP_vmovntpd:
     case OP_unpcklpd:
@@ -353,7 +422,16 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
     case OP_dppd:
         return 8;
 
+    case OP_xorps:
+    case OP_andps:
+    case OP_orps:
+    case OP_cvtpd2ps:
+    case OP_cvttpd2dq://?
+    case OP_rcpps:
+
     /* AVX */
+    case OP_vcvtsd2ss://?
+    
     case OP_vucomiss:
     case OP_vcomiss:
     case OP_vmovmskps:
@@ -391,6 +469,15 @@ FloatOperandSizeTable(instr_t *instr, opnd_t opnd)
     case OP_vdpps:
     case OP_vtestps:
         return 4;
+
+    case OP_cvtdq2pd://?
+    case OP_vcvtsi2sd://?
+    case OP_vcvtss2sd://?
+
+    case OP_sqrtpd:
+    case OP_maxpd:
+    case OP_cmppd:
+    case OP_cvtps2pd:
 
     case OP_vucomisd:
     case OP_vcomisd:
@@ -515,18 +602,72 @@ IntegerOperandSizeTable(instr_t *instr, opnd_t opnd)
     int opc = instr_get_opcode(instr);
 
     switch (opc) {
+        case OP_vpalignr:
+        case OP_vpbroadcastb:
+        case OP_vpcmpeqb:
+        case OP_vpminub:
+        case OP_vpcmpgtb:
+        case OP_vpsubb:
+
         case OP_pmovmskb:
         case OP_pcmpeqb:
-        case OP_pxor:
 	    case OP_paddb:
         case OP_psubb:
+        case OP_pminub:
+        case OP_pshufb:
             return 1;
+
+        case OP_punpcklwd:
+        case OP_punpcklbw:
+            return 2;
+
+        case OP_vmovd:
+        case OP_vpandn:
+
+        case OP_movd:
+
+        case OP_psubd:
+        case OP_pmuludq:
+        case OP_pcmpgtd:
+        case OP_pslld:
+        case OP_psrld:
+        case OP_psrad:
+        case OP_pcmpeqd:
+        case OP_punpckldq:
+        case OP_pshufd:
+        case OP_paddd:
+            return 4;
+
+        case OP_vmovq:
+
+        case OP_movq:
+
+        case OP_psrlq:
+        case OP_psllq:
+        case OP_pand:
+        case OP_pandn:
+        case OP_pxor:
+        case OP_por:
         case OP_punpcklqdq:
+        case OP_punpckhqdq:
         case OP_paddq:
+        case OP_psubq:
             return 8;
+
+        case OP_vpslldq:
+
+        case OP_pslldq:
+        case OP_psrldq:
         case OP_movdqa:
         case OP_movdqu:
             return 16;
+
+        case OP_vmovdqu:
+        case OP_vmovdqa:
+        case OP_vpor:
+        case OP_vpxor:
+        case OP_vpand:
+            return size;
         default: {
             return 0;
         }
@@ -592,10 +733,18 @@ bool instr_is_floating(instr_t* instr) {
                     }
                 }
             } else {
- //               dr_fprintf(STDERR, "??? Non register dst operand!\n");
+                dr_fprintf(STDERR, "??? Non register dst operand!\n");
             }
         }
     }
     return is_float;
 }
 #endif
+
+// Some instr may result in floating point instruction, 
+// while opnd may be integer (e.g., convert instruction)
+bool opnd_is_floating(instr_t* instr, opnd_t opnd) {
+    // currently, we just simply return the result of the instruction type
+    // TODO: make a more accurate table for X86/ARM
+    return instr_is_floating(instr);
+}

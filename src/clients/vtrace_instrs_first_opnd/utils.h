@@ -592,7 +592,7 @@ bool instr_is_floating(instr_t* instr) {
                     }
                 }
             } else {
-                dr_fprintf(STDERR, "??? Non register dst operand!\n");
+ //               dr_fprintf(STDERR, "??? Non register dst operand!\n");
             }
         }
     }

@@ -34,7 +34,6 @@ uint64_t get_miliseconds() {
 #include "dr_tools.h"
 #include <sys/time.h>
 #include "utils.h"
-#include "vprofile.h"
 // #ifdef X86
 //     #define USE_SIMD
 //     #define USE_SSE
@@ -47,35 +46,6 @@ uint64_t get_miliseconds() {
 
 // Client Options
 #include "droption.h"
-#define WINDOW_ENABLE 10000
-#define WINDOW_DISABLE 1000000
-
-int win_enable;
-int win_disable;
-
-static droption_t<bool> op_enable_sampling
-(DROPTION_SCOPE_CLIENT, "enable_sampling", 0, 0, 64, "Enable Bursty Sampling",
- "Enable bursty sampling for lower overhead with less profiling accuracy.");
-
-static droption_t<bool> op_enable_opnd_sampling
-(DROPTION_SCOPE_CLIENT, "enable_opnd_sampling", 0, 0, 64, "Enable Operand-level Bursty Sampling",
- "Enable bursty sampling for lower overhead with less profiling accuracy.");
-
-static droption_t<bool> op_enable_period_sampling
-(DROPTION_SCOPE_CLIENT, "enable_period_sampling", 0, 0, 64, "Enable Operand-level Periodical Sampling",
- "Enable periodical sampling for lower overhead with less profiling accuracy.");
-
-static droption_t<int> op_period
-(DROPTION_SCOPE_CLIENT, "period", 100, 1, 10000, "Periodical window size of Operand-level Periodical Sampling",
- "Periodical window size of Operand-level Periodical Sampling.");
-
-static droption_t<int> op_window
-(DROPTION_SCOPE_CLIENT, "window", WINDOW_DISABLE, 0, INT32_MAX, "Window size configuration of sampling",
- "Window size of sampling. Only available when sampling is enabled.");
-
-static droption_t<int> op_window_enable
-(DROPTION_SCOPE_CLIENT, "window_enable", WINDOW_ENABLE, 0, INT32_MAX, "Window enabled size configuration of sampling",
- "Window enabled size of sampling. Only available when sampling is enabled.");
 
 static droption_t<bool> op_help
 (DROPTION_SCOPE_CLIENT, "help", 0, 0, 64, "Show this help",
@@ -88,6 +58,7 @@ using namespace std;
 #define ZEROSPY_EXIT_PROCESS(format, args...)                                           \
     DRCCTLIB_CLIENT_EXIT_PROCESS_TEMPLATE("zerospy", format, \
                                           ##args)
+
 #ifdef ARM_CCTLIB
 #    define OPND_CREATE_CCT_INT OPND_CREATE_INT
 #else
@@ -104,13 +75,33 @@ using namespace std;
 #    endif
 #endif
 
-// We only interest in memory loads
-bool 
-VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
-    uint32_t user_mask = ANY_DATA_TYPE | MEMORY | READ | BEFORE;
-    return ((user_mask & opmask) == opmask);
+bool instr_is_ignorable(instr_t *ins) {
+    int opc = instr_get_opcode(ins);
+#ifdef AARCH64
+    if(instr_is_exclusive_load(ins) || instr_is_exclusive_store(ins)) {
+        return false;
+    }
+#endif
+    switch (opc) {
+        case OP_nop:
+#ifdef X86
+	    case OP_nop_modrm:
+#endif
+
+#if defined(AARCH64)
+        case OP_isb:
+        case OP_ld3:
+        case OP_ld3r:
+#endif
+                return true;
+        default:
+                return false;
+    }
+
+    return false;
 }
 
+// We only interest in memory loads
 bool
 zerospy_filter_read_mem_access_instr(instr_t *instr)
 {
@@ -119,7 +110,6 @@ zerospy_filter_read_mem_access_instr(instr_t *instr)
 
 #define ZEROSPY_FILTER_READ_MEM_ACCESS_INSTR zerospy_filter_read_mem_access_instr
 
-vtrace_t* vtrace;
 static string g_folder_name;
 static int tls_idx;
 
@@ -176,6 +166,7 @@ typedef struct _per_thread_t {
     file_t output_file;
     int32_t threadId;
     vector<instr_t*> *instr_clones;
+    vector<opnd_t*> *opnd_clones;
 } per_thread_t;
 
 #define IN
@@ -683,48 +674,6 @@ void CheckAndInsertIntPage_impl(int32_t ctxt_hndl, void* addr, per_thread_t *pt)
     }
 #endif
 }
-
-#ifdef X86
-template<uint32_t AccessLen, uint32_t ElemLen, bool isApprox, bool enable_sampling>
-void CheckNByteValueAfterVGather(int slot, instr_t* instr)
-{
-    static_assert(ElemLen==4 || ElemLen==8);
-    void *drcontext = dr_get_current_drcontext();
-    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
-    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
-    if(enable_sampling) {
-        if(!vtracer_get_sampling_state(drcontext)) {
-            return ;
-        }
-    }
-    dr_mcontext_t mcontext;
-    mcontext.size = sizeof(mcontext);
-    mcontext.flags= DR_MC_ALL;
-    DR_ASSERT(dr_get_mcontext(drcontext, &mcontext));
-#ifdef DEBUG_VGATHER
-    printf("\n^^ CheckNByteValueAfterVGather: ");
-    disassemble(drcontext, instr_get_app_pc(instr), 1/*sdtout file desc*/);
-    printf("\n");
-#endif
-    if(isApprox) {
-        app_pc addr;
-        bool is_write;
-        uint32_t pos;
-        for( int index=0; instr_compute_address_ex_pos(instr, &mcontext, index, &addr, &is_write, &pos); ++index ) {
-            DR_ASSERT(!is_write);
-            AddFPRedLog<ElemLen, ElemLen>(ctxt_hndl, addr, pt);
-        }
-    } else {
-        assert(0 && "VGather should be a floating point operation!");
-    }
-}
-#define HANDLE_VGATHER(T, ACCESS_LEN, ELEMENT_LEN, IS_APPROX) do {\
-if(op_enable_sampling.get_value()) { \
-dr_insert_clean_call(drcontext, bb, ins, (void *)CheckNByteValueAfterVGather<(ACCESS_LEN), (ELEMENT_LEN), (IS_APPROX), true>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(ins_clone)); \
-} else { \
-dr_insert_clean_call(drcontext, bb, ins, (void *)CheckNByteValueAfterVGather<(ACCESS_LEN), (ELEMENT_LEN), (IS_APPROX), false>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(ins_clone)); \
-} } while(0)
-#endif
 /***************************************************************************************/
 // accessLen & eleSize are size in bits
 template<uint32_t AccessLen, uint32_t EleSize>
@@ -781,13 +730,119 @@ string getFpRedMapString(uint64_t redmap, uint64_t accessLen) {
 #define getFpRedMapString_DP(redmap, num) getFpRedMapString<2,7>(redmap, num*10)
 /*******************************************************************************************/
 
-template<int size, int esize, bool is_float>
-void trace_update_cb(val_info_t *info) {
-    per_thread_t* pt = (per_thread_t *)drmgr_get_tls_field(dr_get_current_drcontext(), tls_idx);
-    if(is_float) {
-        AddFPRedLog<esize, size>(info->ctxt_hndl, (void*)info->val, pt);
+template<uint32_t AccessLen, uint32_t ElemLen, bool isApprox, bool is_write>
+void CheckNByteValue(int slot, opnd_t *opnd)
+{
+    void *drcontext = dr_get_current_drcontext();
+    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags= DR_MC_ALL;
+    DR_ASSERT(dr_get_mcontext(drcontext, &mcontext));
+    assert(opnd_is_memory_reference(*opnd));
+    assert(!is_write);
+    app_pc addr = opnd_compute_address(*opnd, &mcontext);
+    if(isApprox) AddFPRedLog<ElemLen, ElemLen>(ctxt_hndl, addr, pt);
+    else CheckAndInsertIntPage_impl<AccessLen, ElemLen>(ctxt_hndl, addr, pt);
+}
+
+template<bool is_write>
+void Instrument_impl(void *drcontext, instrlist_t *bb, instr_t *instr, int32_t slot, int size, int esize, bool is_float, int pos)
+{
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    opnd_t *opnd = new opnd_t(instr_get_src(instr, pos));
+    pt->opnd_clones->push_back(opnd);
+
+    if(!is_float) {
+        switch(size) {
+            case 1: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<1,1,false,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 2: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<2,2,false,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 4: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<4,4,false,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 8: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<8,8,false,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 16: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<16,16,false,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 32: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<32,32,false,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 64: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<64,64,false,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            default: {
+                printf("\nERROR: size for instruction is too large: %d!\n", size);
+                printf("^^ Disassembled Instruction ^^^\n");
+                disassemble(drcontext, instr_get_app_pc(instr), 1/*sdtout file desc*/);
+                printf("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n");
+                fflush(stdout);
+                assert(0 && "unexpected large size\n"); break;
+            }
+        }
     } else {
-        CheckAndInsertIntPage_impl<size, esize>(info->ctxt_hndl, (void*)info->val, pt);
+        switch(size) {
+            case 2: break;
+            case 4: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<4,4,true,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 8: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<8,8,true,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            // 128-bit, AVX, SSE
+            case 16: {
+                switch(esize) {
+                    case 4: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<16,4,true,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+                    case 8: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<16,8,true,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+                    default: {
+                        dr_fprintf(STDERR, "esize=%d\n", esize);
+                        assert(0 && "handle large mem read with unexpected operand size\n");
+                    }break;
+                }
+            }break;
+            case 28: break;
+            // 256-bit, AVX2
+            case 32: {
+                switch(esize) {
+                    case 4: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<32,4,true,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+                    case 8: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<32,8,true,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+                    default: assert(0 && "handle large mem read with unexpected operand size\n"); break;
+                }
+            }break;
+            // 512-bit, AVX512
+            case 64: {
+                switch(esize) {
+                    case 4: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<64,4,true,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+                    case 8: dr_insert_clean_call(drcontext, bb, instr, (void*)CheckNByteValue<64,8,true,is_write>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+                    default: assert(0 && "handle large mem read with unexpected operand size\n"); break;
+                }
+            }break;
+            default: {
+                printf("\nERROR: size for instruction is too large: %d!\n", size);
+                printf("^^ Disassembled Instruction ^^^\n");
+                disassemble(drcontext, instr_get_app_pc(instr), 1/*sdtout file desc*/);
+                printf("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n");
+                fflush(stdout);
+                assert(0 && "unexpected large size\n"); break;
+            }
+        }
+    }
+}
+
+void
+InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
+{
+    instrlist_t *bb = instrument_msg->bb;
+    instr_t *instr = instrument_msg->instr;
+    int32_t slot = instrument_msg->slot;
+
+    if(!instr_is_app(instr) || instr_is_ignorable(instr)) return;
+
+    // to-do:vgather & scatter
+
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    // instr_t* ins_clone = instr_clone(drcontext, instr);
+    // pt->instr_clones->push_back(ins_clone);
+
+    int num = instr_num_srcs(instr);
+    for(int j = 0; j < num; j++) {
+        opnd_t opnd = instr_get_src(instr, j);
+        int size = opnd_size_in_bytes(opnd_get_size(opnd));
+        if(size != 0 && opnd_is_memory_reference(opnd)) {
+            bool is_float = opnd_is_floating(instr, opnd);
+            int esize = is_float ? FloatOperandSizeTable(instr, opnd) : IntegerOperandSizeTable(instr, opnd);
+            if(!esize) continue;
+            Instrument_impl<false>(drcontext, bb, instr, slot, size, esize, is_float, j);
+        }
     }
 }
 
@@ -799,68 +854,6 @@ void debug_output(void* val) {
     dr_fprintf(STDOUT, "loaded val=%p\n", val); fflush(stdout);
 }
 
-struct ZerospyInstrument{
-#ifdef X86
-    static __attribute__((always_inline)) void InstrumentReadValueBeforeVGather(void *drcontext, instrlist_t *bb, instr_t *ins, int32_t slot){
-        opnd_t opnd = instr_get_src(ins, 0);
-        uint32_t operSize = FloatOperandSizeTable(ins, opnd); // VGather's second operand is the memory operand
-        uint32_t refSize = opnd_size_in_bytes(opnd_get_size(instr_get_dst(ins, 0)));
-        per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
-        instr_t* ins_clone = instr_clone(drcontext, ins);
-        pt->instr_clones->push_back(ins_clone);
-#ifdef DEBUG_VGATHER
-        printf("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n");
-        printf("^^ refSize = %d, operSize = %d\n", refSize, operSize);
-        printf("^^ Disassembled Instruction ^^^\n");
-        disassemble(drcontext, instr_get_app_pc(ins), STDOUT);
-        printf("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n");
-#endif
-        switch(refSize) {
-            case 1:
-            case 2: 
-            case 4: 
-            case 8: 
-            case 10: 
-                printf("\nERROR: refSize for floating point instruction is too small: %d!\n", refSize);
-                printf("^^ Disassembled Instruction ^^^\n");
-                disassemble(drcontext, instr_get_app_pc(ins), 1/*sdtout file desc*/);
-                printf("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n");
-                fflush(stdout);
-                assert(0 && "memory read floating data with unexptected small size");
-            case 16: {
-                switch (operSize) {
-                    case 4: HANDLE_VGATHER(float, 16, 4, true); break;
-                    case 8: HANDLE_VGATHER(double, 16, 8, true); break;
-                    default: assert(0 && "handle large mem read with unexpected operand size\n"); break;
-                }
-            }break;
-            case 32: {
-                switch (operSize) {
-                    case 4: HANDLE_VGATHER(float, 32, 4, true); break;
-                    case 8: HANDLE_VGATHER(double, 32, 8, true); break;
-                    default: assert(0 && "handle large mem read with unexpected operand size\n"); break;
-                }
-            }break;
-            default: 
-                printf("\nERROR: refSize for floating point instruction is too large: %d!\n", refSize);
-                printf("^^ Disassembled Instruction ^^^\n");
-                disassemble(drcontext, instr_get_app_pc(ins), 1/*sdtout file desc*/);
-                printf("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n");
-                fflush(stdout);
-                assert(0 && "unexpected large memory read\n"); break;
-        }
-    }
-#endif
-};
-
-#ifdef X86
-void InstrumentVGather(void* drcontext, instrlist_t *bb, instr_t* instr, int32_t slot)
-{
-    // We use instr_compute_address_ex_pos to handle gather (with VSIB addressing)
-    ZerospyInstrument::InstrumentReadValueBeforeVGather(drcontext, bb, instr, slot);
-}
-#endif
-
 static void
 ThreadOutputFileInit(per_thread_t *pt)
 {
@@ -870,11 +863,6 @@ ThreadOutputFileInit(per_thread_t *pt)
     sprintf(name + strlen(name), "%s/thread-%d.topn.log", g_folder_name.c_str(), id);
     pt->output_file = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(pt->output_file != INVALID_FILE);
-    if (op_enable_sampling.get_value()) {
-        dr_fprintf(pt->output_file, "[ZEROSPY INFO] Sampling Enabled\n");
-    } else {
-        dr_fprintf(pt->output_file, "[ZEROSPY INFO] Sampling Disabled\n");
-    }
 }
 
 static void
@@ -890,6 +878,7 @@ ClientThreadStart(void *drcontext)
     // pt->FPRedLogMap->rehash(10000000);
     // pt->INTRedLogMap->rehash(10000000);
     pt->instr_clones = new vector<instr_t*>();
+    pt->opnd_clones = new vector<opnd_t*>();
     drmgr_set_tls_field(drcontext, tls_idx, (void *)pt);
     // init output files
     ThreadOutputFileInit(pt);
@@ -1161,6 +1150,10 @@ ClientThreadEnd(void *drcontext)
     for(size_t i=0;i<pt->instr_clones->size();++i) {
         instr_destroy(drcontext, (*pt->instr_clones)[i]);
     }
+    for(size_t i=0;i<pt->opnd_clones->size();++i) {
+        delete (*pt->opnd_clones)[i];
+    }
+    delete pt->opnd_clones;
     delete pt->instr_clones;
     delete pt->INTRedLogMap;
     delete pt->FPRedLogMap;
@@ -1200,18 +1193,6 @@ ClientInit(int argc, const char *argv[])
     gJson = fopen("report.json", "w");
     DR_ASSERT(gFile != INVALID_FILE);
     DR_ASSERT(gJson != NULL);
-    if (op_enable_sampling.get_value()) {
-        dr_fprintf(STDOUT, "[ZEROSPY INFO] Sampling Enabled\n");
-        dr_fprintf(gFile, "[ZEROSPY INFO] Sampling Enabled\n");
-        win_enable = op_window_enable.get_value();
-        win_disable= op_window.get_value();
-        float rate = (float)win_enable / (float)win_disable;
-        dr_fprintf(STDOUT, "[ZEROSPY INFO] Sampling Rate: %.3f, Window Size: %ld\n", rate, win_disable);
-        dr_fprintf(gFile,  "[ZEROSPY INFO] Sampling Rate: %.3f, Window Size: %ld\n", rate, win_disable);
-    } else {
-        dr_fprintf(STDOUT, "[ZEROSPY INFO] Sampling Disabled\n");
-        dr_fprintf(gFile, "[ZEROSPY INFO] Sampling Disabled\n");
-    }
     if (dr_using_all_private_caches()) {
         dr_fprintf(STDOUT, "[ZEROSPY INFO] Thread Private is enabled.\n");
         dr_fprintf(gFile,  "[ZEROSPY INFO] Thread Private is enabled.\n");
@@ -1263,8 +1244,11 @@ ClientExit(void)
         fflush(stdout);
         exit(-1);
     }
-    vprofile_unregister_trace(vtrace);
-    vprofile_exit();
+
+    drcctlib_exit();
+    drutil_exit();
+    drreg_exit();
+    drmgr_exit();
 }
 
 #ifdef __cplusplus
@@ -1277,45 +1261,17 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     dr_set_client_name("DynamoRIO Client 'zerospy'",
                        "http://dynamorio.org/issues");
     ClientInit(argc, argv);
-    win_enable = op_window_enable.get_value();
-    win_disable = op_window.get_value();
-    vprofile_options_t vprofile_opts;
-    vprofile_opts.win_disable = win_disable;
-    vprofile_opts.win_enable = win_enable;
-    vprofile_opts.filter = ZEROSPY_FILTER_READ_MEM_ACCESS_INSTR;
-    vprofile_opts.user_data_cb = NULL;
-    vprofile_opts.ins_instrument_cb = NULL;
-    vprofile_opts.bb_instrument_cb = NULL;
 
-    uint8_t ex_flag = VPROFILE_COLLECT_CCT;
-    uint32_t ex_trace_flag = VPROFILE_TRACE_CCT;
-
-    if (op_enable_sampling.get_value()) {
-        dr_fprintf(STDOUT, "[CLIENT LOG] sampling enabled!\n");
-        vprofile_opts.flag = VPROFILE_SAMPLE_BURSTY_INSTRUCTION | ex_flag;
-        vprofile_init_ex(&vprofile_opts);
-    } else if(op_enable_opnd_sampling.get_value()) {
-        dr_fprintf(STDOUT, "[CLIENT LOG] operand sampling enabled!\n");
-        vprofile_opts.flag = VPROFILE_SAMPLE_BURSTY_OPERAND | ex_flag;
-        vprofile_init_ex(&vprofile_opts);
-    } else if(op_enable_period_sampling.get_value()) {
-        int window = op_period.get_value();
-        dr_fprintf(STDOUT, "[CLIENT LOG] periodical sampling enabled: window=%d!\n", window);
-        vprofile_opts.flag = VPROFILE_SAMPLE_PERIODICAL_OPERAND | ex_flag;
-        vprofile_init_ex(&vprofile_opts);
-        vprofile_set_period_sampling_window(window);
-    } else {
-        vprofile_opts.flag = VPROFILE_DEFAULT | ex_flag;
-        vprofile_init_ex(&vprofile_opts);
+    if (!drmgr_init()) {
+        ZEROSPY_EXIT_PROCESS("ERROR: zerospy unable to initialize drmgr");
     }
-
-    // if(!vprofile_init(ZEROSPY_FILTER_READ_MEM_ACCESS_INSTR, NULL, NULL, NULL, VPROFILE_COLLECT_CCT)) {
-    //     ZEROSPY_EXIT_PROCESS("ERROR: zerospy unable to initialize vprofile");
-    // }
-
-    // if(op_enable_sampling.get_value()) {
-    //     vtracer_enable_sampling(op_window_enable.get_value(), op_window.get_value());
-    // }
+    drreg_options_t ops = { sizeof(ops), 4 /*max slots needed*/, false };
+    if (drreg_init(&ops) != DRREG_SUCCESS) {
+        DR_ASSERT_MSG(false, "ERROR: vtracer unable to initialize drreg");
+    }
+    if (!drutil_init()) {
+        DR_ASSERT_MSG(false, "ERROR: vtracer unable to initialize drutil");
+    }
 
     drmgr_priority_t thread_init_pri = { sizeof(thread_init_pri),
                                          "zerospy-thread-init", NULL, NULL,
@@ -1339,37 +1295,9 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     }
     gLock = dr_mutex_create();
 
+    drcctlib_init_ex(zerospy_filter_read_mem_access_instr, INVALID_FILE, InstrumentInsCallback, NULL, NULL, DRCCTLIB_DEFAULT);
+
     dr_register_exit_event(ClientExit);
-
-    vtrace = vprofile_allocate_trace(VPROFILE_TRACE_VAL_CCT | ex_trace_flag);
-
-    uint32_t opnd_mask = ANY_DATA_TYPE | MEMORY | READ | BEFORE;
-
-    // Tracing Buffer
-    // Integer 1 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT8, trace_update_cb<1,1,false>);
-    // Integer 2 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT16, trace_update_cb<2,2,false>);
-    // Integer 4 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT32, trace_update_cb<4,4,false>);
-    // Integer 8 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT64, trace_update_cb<8,8,false>);
-    // Integer 16 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT128, trace_update_cb<16,16,false>);
-    // Integer 32 B
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, INT256, trace_update_cb<32,32,false>);
-    // Floating Point Single
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, SPx1, trace_update_cb<4,4,true>);
-    // Floating Point Double
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, DPx1, trace_update_cb<8,8,true>);
-    // Floating Point 4*Single
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, SPx4, trace_update_cb<16,4,true>);
-    // Floating Point 2*Double
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, DPx2, trace_update_cb<16,8,true>);
-    // Floating Point 8*Single
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, SPx8, trace_update_cb<32,4,true>);
-    // Floating Point 4*Double
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, DPx4, trace_update_cb<32,8,true>);
 }
 
 #ifdef __cplusplus

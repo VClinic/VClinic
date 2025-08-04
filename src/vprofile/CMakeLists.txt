@@ -32,6 +32,7 @@ use_DynamoRIO_extension(vprofile drsyms)
 use_DynamoRIO_extension(vprofile drwrap)
 use_DynamoRIO_extension(vprofile drreg)
 use_DynamoRIO_extension(vprofile drcctlib)
+use_DynamoRIO_extension(vprofile drbbdup) 
 
 # VPROFILE version with data address info logged
 add_library(vprofile_with_addr SHARED ${srcs})
@@ -43,6 +44,7 @@ use_DynamoRIO_extension(vprofile_with_addr drsyms)
 use_DynamoRIO_extension(vprofile_with_addr drwrap)
 use_DynamoRIO_extension(vprofile_with_addr drreg)
 use_DynamoRIO_extension(vprofile_with_addr drcctlib_with_addr)
+use_DynamoRIO_extension(vprofile_with_addr drbbdup) 
 
 add_library(vprofile_static STATIC ${srcs_static})
 configure_extension(vprofile_static ON)
@@ -53,6 +55,7 @@ use_DynamoRIO_extension(vprofile_static drsyms_static)
 use_DynamoRIO_extension(vprofile_static drwrap_static)
 use_DynamoRIO_extension(vprofile_static drreg_static)
 use_DynamoRIO_extension(vprofile_static drcctlib_static)
+use_DynamoRIO_extension(vprofile_static drbbdup_static) 
 
 # DRCCTLib version with data address info logged
 add_library(vprofile_with_addr_static STATIC ${srcs_static})
@@ -64,6 +67,7 @@ use_DynamoRIO_extension(vprofile_with_addr_static drsyms_static)
 use_DynamoRIO_extension(vprofile_with_addr_static drwrap_static)
 use_DynamoRIO_extension(vprofile_with_addr_static drreg_static)
 use_DynamoRIO_extension(vprofile_with_addr_static drcctlib_with_addr_static)
+use_DynamoRIO_extension(vprofile_with_addr_static drbbdup_static)
 
 install_ext_header(vprofile.h)
 install_ext_header(vprofile_filter_func_list.h)

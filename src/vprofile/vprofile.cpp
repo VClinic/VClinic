@@ -7,6 +7,8 @@
 #include "drvector.h"
 #include "utils.h"
 
+#include "drbbdup.h"
+
 #ifdef DEBUG
     #define VPROFILE_DEBUG
 #endif
@@ -17,6 +19,9 @@
 #define MAX_CLASS_SIZE 64
 /* Max number of mem_ref a buffer can have. */
 #define MAX_NUM_MEM_REFS 4096
+
+#define WINDOW_ENABLE_DEFAULT 10000
+#define WINDOW_DISABLE_DEFAULT 1000000
 
 /* constant defines */
 #define VPROFILE_TRACE_MASK 0xf
@@ -157,11 +162,14 @@ static client_cb_t global_client_cb;
 static bool (*global_instr_filter)(instr_t *) = VPROFILE_FILTER_ALL_INSTR;
 
 static uint8_t global_flags = VPROFILE_DEFAULT;
+static int global_analysis_period = 1;
 
 /* record the vtrace registered by user*/
 static drvector_t vtrace_t_list;
 /* A flag to avoid work when no traces were ever created. */
 static bool any_traces_created;
+static bool enable_cct;
+static bool enable_bursty_sampling;
 
 #ifdef VPROFILE_DEBUG
 file_t gDebug;
@@ -177,6 +185,10 @@ void debug_unknown_case(void *drcontext, instr_t * instr, opnd_t opnd) {
     dr_fprintf(gDebug, "\n");
 }
 #endif
+
+bool instr_cct_filter(instr_t *instr) {
+    return (instr_is_app(instr) && !instr_is_ignorable(instr) && global_instr_filter(instr));
+}
 
 /* help function to get buffer trace */
 vtrace_buffer_t* get_trace_buf(vtrace_t *trace, bool is_float, int esize, int size) {
@@ -239,6 +251,10 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
         DR_ASSERT_MSG(with_cct, "Usage Error: CCT info required while VPROFILE_COLLECT_CCT is not set in vprofile_init().");
     }
 
+    if(opnd_is_pc(opnd)) {
+        DR_ASSERT_MSG(false, "VPROFILE: PC opnd profiling currently not well supported.\n");
+    }
+
     instr_t* instr = insert_where;
 
     bool is_float = TEST_OPND_MASK(type, IS_FLOATING);
@@ -282,10 +298,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_get_trace_buffer_in_reg(drcontext, instr, bb, buf, reg_ptr);
             // addr
             if(opnd_is_memory_reference(opnd)) {
-                if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
-                        DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
-                }
-                vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_VCAI_t, addr));
+                vtracer_insert_trace_addr(drcontext, instr, bb, opnd, reg_ptr, reg_addr, scratch, offsetof(cache_VCAI_t, addr));
             } else if(opnd_is_reg(opnd)) {
                 vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32((int32_t)opnd_get_reg(opnd)), reg_ptr, scratch, offsetof(cache_VCAI_t, addr));
             }
@@ -293,7 +306,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(packed_info), reg_ptr, scratch, offsetof(cache_VCAI_t, opnd_info));
             // CCT
             drcctlib_get_context_handle_in_reg(drcontext, bb, instr, slot, reg_addr, scratch);
-            vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_VCAI_t, ctxt_hndl));
+            vtracer_insert_trace_val_native(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_VCAI_t, ctxt_hndl));
             // info, where is not for trace
             opnd_t info = OPND_CREATE_INTPTR((*global_client_cb.user_data_cb)(drcontext, where, bb, opnd));
             vtracer_insert_trace_val(drcontext, instr, bb, info, reg_ptr, scratch, offsetof(cache_VCAI_t, user_data));
@@ -312,10 +325,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_get_trace_buffer_in_reg(drcontext, instr, bb, buf, reg_ptr);
             // addr
             if(opnd_is_memory_reference(opnd)) {
-                if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
-                        DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
-                }
-                vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_VCA_t, addr));
+                vtracer_insert_trace_addr(drcontext, instr, bb, opnd, reg_ptr, reg_addr, scratch, offsetof(cache_VCA_t, addr));
             } else if(opnd_is_reg(opnd)) {
                 vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(opnd_get_reg(opnd)), reg_ptr, scratch, offsetof(cache_VCA_t, addr));
             }
@@ -323,7 +333,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(packed_info), reg_ptr, scratch, offsetof(cache_VCA_t, opnd_info));
             // CCT
             drcctlib_get_context_handle_in_reg(drcontext, bb, instr, slot, reg_addr, scratch);
-            vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_VCA_t, ctxt_hndl));
+            vtracer_insert_trace_val_native(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_VCA_t, ctxt_hndl));
             // value
             vtracer_insert_trace_val(drcontext, instr, bb, opnd, reg_ptr, scratch, offsetof(cache_VCA_t, val));
             // update buf ptr
@@ -341,7 +351,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(packed_info), reg_ptr, scratch, offsetof(cache_VCI_t, opnd_info));
             // CCT
             drcctlib_get_context_handle_in_reg(drcontext, bb, instr, slot, reg_addr, scratch);
-            vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_VCI_t, ctxt_hndl));
+            vtracer_insert_trace_val_native(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_VCI_t, ctxt_hndl));
             // info, where is not for trace
             opnd_t info = OPND_CREATE_INTPTR((*global_client_cb.user_data_cb)(drcontext, where, bb, opnd));
             vtracer_insert_trace_val(drcontext, instr, bb, info, reg_ptr, scratch, offsetof(cache_VCI_t, user_data));
@@ -362,7 +372,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(packed_info), reg_ptr, scratch, offsetof(cache_VC_t, opnd_info));
             // CCT
             drcctlib_get_context_handle_in_reg(drcontext, bb, instr, slot, reg_addr, scratch);
-            vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_VC_t, ctxt_hndl));
+            vtracer_insert_trace_val_native(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_VC_t, ctxt_hndl));
             // value
             vtracer_insert_trace_val(drcontext, instr, bb, opnd, reg_ptr, scratch, offsetof(cache_VC_t, val));
             // update buf ptr
@@ -378,10 +388,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_get_trace_buffer_in_reg(drcontext, instr, bb, buf, reg_ptr);
             // addr
             if(opnd_is_memory_reference(opnd)) {
-                if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
-                        DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
-                }
-                vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_VAI_t, addr));
+                vtracer_insert_trace_addr(drcontext, instr, bb, opnd, reg_ptr, reg_addr, scratch, offsetof(cache_VAI_t, addr));
             } else if(opnd_is_reg(opnd)) {
                 vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(opnd_get_reg(opnd)), reg_ptr, scratch, offsetof(cache_VAI_t, addr));
             }
@@ -405,10 +412,11 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_get_trace_buffer_in_reg(drcontext, instr, bb, buf, reg_ptr);
             // addr
             if(opnd_is_memory_reference(opnd)) {
-                if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
-                        DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
-                }
-                vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_VA_t, addr));
+                vtracer_insert_trace_addr(drcontext, instr, bb, opnd, reg_ptr, reg_addr, scratch, offsetof(cache_VA_t, addr));
+                // if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
+                //         DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
+                // }
+                // vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_VA_t, addr));
             } else if(opnd_is_reg(opnd)) {
                 vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(opnd_get_reg(opnd)), reg_ptr, scratch, offsetof(cache_VA_t, addr));
             }
@@ -462,10 +470,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_get_trace_buffer_in_reg(drcontext, instr, bb, buf, reg_ptr);
             // addr
             if(opnd_is_memory_reference(opnd)) {
-                if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
-                        DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
-                }
-                vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_CAI_t, addr));
+                vtracer_insert_trace_addr(drcontext, instr, bb, opnd, reg_ptr, reg_addr, scratch, offsetof(cache_CAI_t, addr));
             } else if(opnd_is_reg(opnd)) {
                 vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(opnd_get_reg(opnd)), reg_ptr, scratch, offsetof(cache_CAI_t, addr));
             }
@@ -473,7 +478,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(packed_info), reg_ptr, scratch, offsetof(cache_CAI_t, opnd_info));
             // CCT
             drcctlib_get_context_handle_in_reg(drcontext, bb, instr, slot, reg_addr, scratch);
-            vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_CAI_t, ctxt_hndl));
+            vtracer_insert_trace_val_native(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_CAI_t, ctxt_hndl));
             // info, where is not for trace
             opnd_t info = OPND_CREATE_INTPTR((*global_client_cb.user_data_cb)(drcontext, where, bb, opnd));
             vtracer_insert_trace_val(drcontext, instr, bb, info, reg_ptr, scratch, offsetof(cache_CAI_t, user_data));
@@ -486,10 +491,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_get_trace_buffer_in_reg(drcontext, instr, bb, buf, reg_ptr);
             // addr
             if(opnd_is_memory_reference(opnd)) {
-                if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
-                        DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
-                }
-                vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_CA_t, addr));
+                vtracer_insert_trace_addr(drcontext, instr, bb, opnd, reg_ptr, reg_addr, scratch, offsetof(cache_CA_t, addr));
             } else if(opnd_is_reg(opnd)) {
                 vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(opnd_get_reg(opnd)), reg_ptr, scratch, offsetof(cache_CA_t, addr));
             }
@@ -497,7 +499,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(packed_info), reg_ptr, scratch, offsetof(cache_CA_t, opnd_info));
             // CCT
             drcctlib_get_context_handle_in_reg(drcontext, bb, instr, slot, reg_addr, scratch);
-            vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_CA_t, ctxt_hndl));
+            vtracer_insert_trace_val_native(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_CA_t, ctxt_hndl));
             // update buf ptr
             vtracer_insert_trace_forward(drcontext, instr, bb, sizeof(cache_CA_t), buf, reg_ptr, scratch);
             break;
@@ -509,7 +511,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(packed_info), reg_ptr, scratch, offsetof(cache_CI_t, opnd_info));
             // CCT
             drcctlib_get_context_handle_in_reg(drcontext, bb, instr, slot, reg_addr, scratch);
-            vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_CI_t, ctxt_hndl));
+            vtracer_insert_trace_val_native(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_CI_t, ctxt_hndl));
             // info, where is not for trace
             opnd_t info = OPND_CREATE_INTPTR((*global_client_cb.user_data_cb)(drcontext, where, bb, opnd));
             vtracer_insert_trace_val(drcontext, instr, bb, info, reg_ptr, scratch, offsetof(cache_CI_t, user_data));
@@ -522,10 +524,11 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_get_trace_buffer_in_reg(drcontext, instr, bb, buf, reg_ptr);
             // addr
             if(opnd_is_memory_reference(opnd)) {
-                if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
-                        DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
-                }
-                vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_AI_t, addr));
+                // if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
+                //         DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
+                // }
+                // vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_AI_t, addr));
+                vtracer_insert_trace_addr(drcontext, instr, bb, opnd, reg_ptr, reg_addr, scratch, offsetof(cache_AI_t, addr));
             } else if(opnd_is_reg(opnd)) {
                 vtracer_insert_trace_constant(drcontext, instr, bb, (uint32_t)opnd_get_reg(opnd), reg_ptr, scratch, offsetof(cache_AI_t, addr));
             }
@@ -543,10 +546,11 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_get_trace_buffer_in_reg(drcontext, instr, bb, buf, reg_ptr);
             // addr
             if(opnd_is_memory_reference(opnd)) {
-                if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
-                        DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
-                }
-                vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_A_t, addr));
+                // if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
+                //         DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
+                // }
+                // vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_A_t, addr));
+                vtracer_insert_trace_addr(drcontext, instr, bb, opnd, reg_ptr, reg_addr, scratch, offsetof(cache_A_t, addr));
             } else if(opnd_is_reg(opnd)) {
                 vtracer_insert_trace_constant(drcontext, instr, bb, (uint32_t)opnd_get_reg(opnd), reg_ptr, scratch, offsetof(cache_A_t, addr));
             }
@@ -609,6 +613,10 @@ getOpndMask(instr_t* instr, opnd_t opnd) {
         } else if(opnd_is_immed(opnd)) {
             mask |= IMMEDIATE;
         } else {
+            opnd_disassemble(dr_get_current_drcontext(), opnd, STDOUT);
+            dr_fprintf(STDOUT, "\n");
+            instr_disassemble(dr_get_current_drcontext(), opnd_get_instr(opnd), STDOUT);
+            dr_fprintf(STDOUT, "\n");
             DR_ASSERT_MSG(false, "getOpndMask Unknown opnd!");
         }
     }
@@ -644,12 +652,39 @@ instrument_opnd(void *drcontext, instrlist_t *bb, instr_t *where, instr_t *inser
     }
 }
 
-template<bool with_cct>
+void debug_print(int n) {
+    dr_fprintf(STDOUT, "[debug] ======== debug_print: %d =========\n", n);
+}
+
+void debug_print_instr(instr_t* ins_clone, int j) {
+    dr_fprintf(STDOUT, "[debug] instr: ");
+    instr_disassemble(dr_get_current_drcontext(), ins_clone, STDOUT);
+    if(j>=0) {
+        dr_fprintf(STDOUT, "\n***** opnd: ");
+        opnd_t opnd = instr_get_dst(ins_clone, j);
+        opnd_disassemble(dr_get_current_drcontext(), opnd, STDOUT);
+        dr_fprintf(STDOUT, "\n");
+    } else {
+        dr_fprintf(STDOUT, "\n");
+    }
+}
+
+void debug_cleancall() {
+
+}
+
+template<bool with_cct, bool with_sample>
 void
-InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, int slot)
+InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, instr_t* where, int slot)
 {
+    if(!with_sample) {
+        DR_ASSERT(instr==where);
+    }
     if(!instr_is_app(instr) || instr_is_ignorable(instr)) return;
     
+    if(with_sample && global_client_cb.ins_instrument_cb) {
+        DR_ASSERT_MSG(false, "NYI: user-defined ins_instrument_cb not supported for sampling.\n");
+    }
     if(global_client_cb.ins_instrument_cb)
         (*global_client_cb.ins_instrument_cb)(drcontext, instr, bb);
 
@@ -684,11 +719,12 @@ InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, int slot
     drvector_t allowed;
 
     // insert before
-    getUnusedRegEntryInstr(&allowed, instr);
+    getUnusedRegEntryInstr(&allowed, where);
+    getUnusedRegEntryInstrWithoutInit(&allowed, instr);
 
-    RESERVE_REG(drcontext, bb, instr, &allowed, scratch);
-    RESERVE_REG(drcontext, bb, instr, &allowed, reg_addr);
-    RESERVE_REG(drcontext, bb, instr, &allowed, reg_ptr);
+    RESERVE_REG(drcontext, bb, where, &allowed, scratch);
+    RESERVE_REG(drcontext, bb, where, &allowed, reg_addr);
+    RESERVE_REG(drcontext, bb, where, &allowed, reg_ptr);
     // for each trace registered by user, we need to call func in vtrace to trace value.
     for (i = 0; i < vtrace_t_list.entries; ++i) {
         vtrace_t *trace = (vtrace_t*)drvector_get_entry(&vtrace_t_list, i);
@@ -705,7 +741,7 @@ InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, int slot
                 //     }
                 // }
                 if(FILTER_OPND_MASK(trace->opnd_mask, opmask)) {
-                    instrument_opnd<with_cct>(drcontext, bb, instr, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch, true, opmask);
+                    instrument_opnd<with_cct>(drcontext, bb, instr, where, slot, opnd, trace, reg_addr, reg_ptr, scratch, true, opmask);
                 }
             }
         }
@@ -716,7 +752,7 @@ InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, int slot
             if(opnd_size_in_bytes(opnd_get_size(opnd)) == 0) continue;
             uint32_t opmask = getOpndMask<false, true>(instr, opnd);
             if(FILTER_OPND_MASK(trace->opnd_mask, opmask)) {
-                instrument_opnd<with_cct>(drcontext, bb, instr, instr, slot, opnd, trace, reg_addr, reg_ptr, scratch, true, opmask);
+                instrument_opnd<with_cct>(drcontext, bb, instr, where, slot, opnd, trace, reg_addr, reg_ptr, scratch, true, opmask);
                 if(TEST_FLAG(trace->trace_flag, VPROFILE_TRACE_REG_IN_MEMREF) && TEST_OPND_MASK(opmask, MEMORY)) {
                     int reg_num = opnd_num_regs_used(opnd);
                     for(int k = 0; k < reg_num; k++) {
@@ -725,30 +761,34 @@ InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, int slot
                         if(reg_size == 0) {
                             continue;
                         }
-                        instrument_opnd<with_cct>(drcontext, bb, instr, instr, slot, reg_used, trace, reg_addr, reg_ptr, scratch, true, opmask);
+                        instrument_opnd<with_cct>(drcontext, bb, instr, where, slot, reg_used, trace, reg_addr, reg_ptr, scratch, true, opmask);
                     }
                 } 
             }
         }
     }
-    UNRESERVE_REG(drcontext, bb, instr, scratch);
-    UNRESERVE_REG(drcontext, bb, instr, reg_addr);
-    UNRESERVE_REG(drcontext, bb, instr, reg_ptr);
+    UNRESERVE_REG(drcontext, bb, where, scratch);
+    UNRESERVE_REG(drcontext, bb, where, reg_addr);
+    UNRESERVE_REG(drcontext, bb, where, reg_ptr);
+    if (with_sample) {
+        drreg_restore_all(drcontext, bb, where);
+    }
 
     // insert after
     // skip cti and syscall instr, cause they may terminate the block and cannot insert instrs after them.
     // remember to modify fill num cb as well
-    if(!instr_is_cti(instr) && !instr_is_syscall(instr)) {
-        instr_t *insert_where = instr_get_next_app(instr);
-        if(insert_where) {
+    if(!instr_is_cti(where) && !instr_is_syscall(where) && 
+       !instr_is_cti(instr) && !instr_is_syscall(instr)) {
+        instr_t *insert_where = instr_get_next_app(where);
+        bool nop_allocated;
+        if(!with_sample && insert_where) {
+            nop_allocated = false;
             getUnusedRegEntryInstrWithoutInit(&allowed, insert_where);
         } else {
-            instrlist_meta_postinsert(bb, instr, XINST_CREATE_nop(drcontext));
-            insert_where = instr_get_next(instr);
+            nop_allocated = true;
+            insert_where = XINST_CREATE_nop(drcontext);
         }
-        RESERVE_REG(drcontext, bb, insert_where, &allowed, scratch);
-        RESERVE_REG(drcontext, bb, insert_where, &allowed, reg_addr);
-        RESERVE_REG(drcontext, bb, insert_where, &allowed, reg_ptr);
+        bool reserved = false;
 
         // for each trace registered by user, we need to call func in vtrace to trace value.
         for (i = 0; i < vtrace_t_list.entries; ++i) {
@@ -760,24 +800,32 @@ InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, int slot
                 if(opnd_size_in_bytes(opnd_get_size(opnd)) == 0) continue;
                 uint32_t opmask = getOpndMask<true, false>(instr, opnd);
                 if(FILTER_OPND_MASK(trace->opnd_mask, opmask)) {
-                    instrument_opnd<with_cct>(drcontext, bb, instr, insert_where, slot, opnd, trace, reg_addr, reg_ptr, scratch, false, opmask);
-                    if(TEST_FLAG(trace->trace_flag, VPROFILE_TRACE_REG_IN_MEMREF) && TEST_OPND_MASK(opmask, MEMORY)) {
-                        int reg_num = opnd_num_regs_used(opnd);
-                        for(int k = 0; k < reg_num; k++) {
-                            opnd_t reg_used = opnd_create_reg(opnd_get_reg_used(opnd, k));
-                            int reg_size = opnd_size_in_bytes(opnd_get_size(reg_used));
-                            if(reg_size == 0) {
-                                continue;
-                            }
-                            instrument_opnd<with_cct>(drcontext, bb, instr, insert_where, slot, reg_used, trace, reg_addr, reg_ptr, scratch, false, opmask);
+                    if(!reserved) {
+                        reserved = true;
+                        if (nop_allocated) {
+                            instrlist_meta_postinsert(bb, where, insert_where);
                         }
-                    } 
+                        RESERVE_REG(drcontext, bb, insert_where, &allowed, scratch);
+                        RESERVE_REG(drcontext, bb, insert_where, &allowed, reg_addr);
+                        RESERVE_REG(drcontext, bb, insert_where, &allowed, reg_ptr);
+                    }
+                    instrument_opnd<with_cct>(drcontext, bb, instr, insert_where, slot, opnd, trace, reg_addr, reg_ptr, scratch, false, opmask);
                 }
             }
         }
-        UNRESERVE_REG(drcontext, bb, insert_where, scratch);
-        UNRESERVE_REG(drcontext, bb, insert_where, reg_addr);
-        UNRESERVE_REG(drcontext, bb, insert_where, reg_ptr);
+        if (reserved) {
+            UNRESERVE_REG(drcontext, bb, insert_where, scratch);
+            UNRESERVE_REG(drcontext, bb, insert_where, reg_addr);
+            UNRESERVE_REG(drcontext, bb, insert_where, reg_ptr);
+            if (with_sample) {
+                /* Avoid lazy unreservation which causes unexpected behaviors */
+                drreg_restore_all(drcontext, bb, insert_where);
+            }
+        } else {
+            if (nop_allocated) {
+                instr_destroy(drcontext, insert_where);
+            }
+        }
     }
     drvector_delete(&allowed);
 }
@@ -1675,17 +1723,17 @@ void handleVGatherScatter(int slot, instrlist_t *bb, instr_t* instr) {
                 uint32_t opmask = getOpndMask<true, false>(instr, opnd);
                 if(FILTER_OPND_MASK(trace->opnd_mask, opmask)) {
                     handleOpnd(drcontext, trace, slot, bb, instr, insert_where, opnd, opmask);
-                    if(TEST_FLAG(trace->trace_flag, VPROFILE_TRACE_REG_IN_MEMREF) && TEST_OPND_MASK(opmask, MEMORY)) {
-                        int reg_num = opnd_num_regs_used(opnd);
-                        for(int k = 0; k < reg_num; k++) {
-                            opnd_t reg_used = opnd_create_reg(opnd_get_reg_used(opnd, k));
-                            int reg_size = opnd_size_in_bytes(opnd_get_size(reg_used));
-                            if(reg_size == 0) {
-                                continue;
-                            }
-                            handleOpnd(drcontext, trace, slot, bb, instr, insert_where, reg_used, opmask);
-                        }
-                    } 
+                    // if(TEST_FLAG(trace->trace_flag, VPROFILE_TRACE_REG_IN_MEMREF) && TEST_OPND_MASK(opmask, MEMORY)) {
+                    //     int reg_num = opnd_num_regs_used(opnd);
+                    //     for(int k = 0; k < reg_num; k++) {
+                    //         opnd_t reg_used = opnd_create_reg(opnd_get_reg_used(opnd, k));
+                    //         int reg_size = opnd_size_in_bytes(opnd_get_size(reg_used));
+                    //         if(reg_size == 0) {
+                    //             continue;
+                    //         }
+                    //         handleOpnd(drcontext, trace, slot, bb, instr, insert_where, reg_used, opmask);
+                    //     }
+                    // } 
                 }
             }
         }
@@ -1713,7 +1761,56 @@ InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
         handleVGatherScatter(slot, bb, instr);
     } else 
 #endif
-        InstrumentInstruction<true>(drcontext, bb, instr, slot);
+        InstrumentInstruction<true, false>(drcontext, bb, instr, instr, slot);
+}
+
+void SampledInstrumentCallback_CCT(void *drcontext, void *tag, instrlist_t *bb, instr_t *instr, instr_t *where, void *user_data, void *orig_analysis_data) {
+    bool is_start;
+    drbbdup_is_first_instr(drcontext, instr, &is_start);
+    if (is_start) {
+        if(global_client_cb.bb_instrument_cb) {
+            DR_ASSERT_MSG(false, "NYI: bb instrumentation callback not supported for sampling.");
+        }
+    }
+    if(!instr_is_app(instr) || instr_is_ignorable(instr)) return;
+    if(global_instr_filter(instr)) {
+        int slot = drcctlib_query_slot(orig_analysis_data, instr);
+        if(slot<0) {
+            // when slot is invalid, ignore it
+            return ;
+        }
+#ifdef X86
+        if(instr_is_gather(instr) || instr_is_scatter(instr)) {
+            handleVGatherScatter(slot, bb, instr);
+        } else 
+#endif
+        InstrumentInstruction<true, true>(drcontext, bb, instr, where, slot);
+    }
+}
+
+void SampledInstrumentCallback_default(void *drcontext, void *tag, instrlist_t *bb, instr_t *instr, instr_t *where, void *user_data, void *orig_analysis_data) {
+    bool is_start;
+    drbbdup_is_first_instr(drcontext, instr, &is_start);
+    if (is_start) {
+        if(global_client_cb.bb_instrument_cb) {
+            DR_ASSERT_MSG(false, "NYI: bb instrumentation callback not supported for sampling.");
+        }
+    }
+    if(!instr_is_app(instr) || instr_is_ignorable(instr)) return;
+    if(global_instr_filter(instr)) {
+#ifdef X86
+        if(instr_is_gather(instr) || instr_is_scatter(instr)) {
+            handleVGatherScatter(0, bb, instr);
+        } else 
+#endif
+        InstrumentInstruction<false, true>(drcontext, bb, instr, where, 0/*not used*/);
+    }
+    // drbbdup_is_last_instr(drcontext, instr, &is_start);
+    // if (is_start) {
+    //     dr_fprintf(STDOUT, "[debug] instr list:\n");
+    //     instrlist_disassemble(drcontext, (app_pc)tag, bb, STDOUT);
+    //     dr_fprintf(STDOUT, "================\n");
+    // }
 }
 
 static dr_emit_flags_t
@@ -1724,16 +1821,32 @@ event_basic_block_default(void *drcontext, void *tag, instrlist_t *bb, bool for_
     if(global_client_cb.bb_instrument_cb)
         (*global_client_cb.bb_instrument_cb)(drcontext, bb);
 
+#if defined(ARM) || defined(AARCH64)
+    bool skip = false;
+#endif
     for (instr = instrlist_first(bb); instr != NULL; instr = instr_get_next(instr)) {
-        if(!instr_is_app(instr) || instr_is_ignorable(instr)) continue;
+        if(!instr_is_app(instr)) continue;
+#if defined(ARM) || defined(AARCH64)
+        if (!skip && (instr_is_exclusive_load(instr) || instr_is_ldstex(instr))) {
+            skip = true;
+        }
+        if (!skip) {
+#endif
+        if(instr_is_ignorable(instr)) continue;
         if(global_instr_filter(instr)) {
 #ifdef X86
             if(instr_is_gather(instr) || instr_is_scatter(instr)) {
                 handleVGatherScatter(0, bb, instr);
             } else 
 #endif
-                InstrumentInstruction<false>(drcontext, bb, instr, 0/*not used*/);
+            InstrumentInstruction<false, false>(drcontext, bb, instr, instr, 0/*not used*/);
         }
+#if defined(ARM) || defined(AARCH64)
+        }
+        if (skip && (instr_is_exclusive_store(instr) || instr_is_ldstex(instr))) {
+            skip = false;
+        }
+#endif
     }
     
     return DR_EMIT_DEFAULT;
@@ -1775,12 +1888,8 @@ ClientThreadStart(void *drcontext)
 }
 
 #endif
-bool vprofile_init(bool (*filter)(instr_t *),
-                   void* (*user_data_cb)(void *, instr_t *, instrlist_t *, opnd_t),
-                   void (*ins_instrument_cb)(void *, instr_t *, instrlist_t *),
-                   void (*bb_instrument_cb)(void *, instrlist_t *),
-                   uint8_t flag)
-{
+
+bool vprofile_init_ex(vprofile_options_t* opts) {
 #ifdef VPROFILE_DEBUG
     LOG_INIT(EVERYTHING);
     pid_t pid = getpid();
@@ -1796,13 +1905,70 @@ bool vprofile_init(bool (*filter)(instr_t *),
     DR_ASSERT(gDebug != INVALID_FILE);
 #endif
 
-    vprofile_register_instr_filter(filter);
-    vprofile_register_client_cb(user_data_cb, ins_instrument_cb, bb_instrument_cb);
+    uint8_t flag = opts->flag;
+    vprofile_register_instr_filter(opts->filter);
+    vprofile_register_client_cb(opts->user_data_cb, opts->ins_instrument_cb, opts->bb_instrument_cb);
     global_flags = flag;
 
-    if(!vtracer_init()) {
-        DR_ASSERT_MSG(false, "ERROR: vprofile unable to initialize vtracer");
+    // enable_cct = ((flag & VPROFILE_ENABLE_CCT_COLLECTION) != 0);
+    enable_cct = ((flag & VPROFILE_COLLECT_CCT) != 0);
+
+    if (flag & VPROFILE_SAMPLE_BURSTY) {
+        vtracer_options_t vtracer_opts;
+        if (flag & VPROFILE_SAMPLE_BURSTY_INSTRUCTION) {
+            vtracer_opts.mode = VTRACER_BURSTY_SAMPLE_INSRUCTION;
+        } else {
+            vtracer_opts.mode = VTRACER_BURSTY_SAMPLE_OPERAND;
+        }
+        vtracer_opts.win_enable = opts->win_enable;
+        vtracer_opts.win_disable = opts->win_disable;
+        if(!vtracer_init_ex(&vtracer_opts)) {
+            DR_ASSERT_MSG(false, "ERROR: vprofile unable to initialize vtracer");
+        }
+        // if (flag & VPROFILE_ENABLE_CCT_COLLECTION) {
+        if((flag & VPROFILE_COLLECT_CCT) != 0) {
+            vtracer_register_sampled_callback(drcctlib_analyse_orig_bb, drcctlib_destroy_orig_analysis, drcctlib_instr_bb_sampled, drcctlib_instr_bb_cached, SampledInstrumentCallback_CCT);
+        } else {
+            vtracer_register_sampled_callback(NULL, NULL, NULL, NULL, SampledInstrumentCallback_default);
+        }
+        enable_bursty_sampling = true;
+        if(enable_cct) {
+            if((flag & VPROFILE_COLLECT_DATAOBJ) != 0) {
+                drcctlib_init_ex(opts->filter, INVALID_FILE, NULL, NULL, NULL, DRCCTLIB_COLLECT_DATA_CENTRIC_MESSAGE | DRCCTLIB_SAMPLE_EX_MODE);
+            } else if((flag & VPROFILE_COLLECT_CCT) != 0) {
+                /* Currently, DRCCTLIB_CACHE_MODE is specified to implement mem_ref only traces */
+                // drcctlib_init_ex(filter, INVALID_FILE, InstrumentInsCallback, NULL, NULL, DRCCTLIB_CACHE_MODE);
+                // We use the default mode for CCT-only for correctness
+                // TODO: Modify DRCCTLib to support more flex cache mode implementation
+                drcctlib_init_ex(opts->filter, INVALID_FILE, NULL, NULL, NULL, DRCCTLIB_SAMPLE_EX_MODE);
+            }
+        }
+    } else {
+        if(!vtracer_init()) {
+            DR_ASSERT_MSG(false, "ERROR: vprofile unable to initialize vtracer");
+        }
+        enable_bursty_sampling = false;
+        if(!enable_cct) {
+            if(!drmgr_register_bb_instrumentation_event(event_basic_block_default, NULL, NULL)) {
+                DR_ASSERT_MSG(false, "ERROR: vprofile unable to register events");
+            }
+        } else {
+            if((flag & (VPROFILE_COLLECT_DATAOBJ_TREE_BASED | VPROFILE_COLLECT_DATAOBJ_ADDR_RANGE)) != 0) {
+                DR_ASSERT_MSG(false, "Not Implemented for VPROFILE_COLLECT_DATAOBJ_TREE_BASED and VPROFILE_COLLECT_DATAOBJ_ADDR_RANGE modes!");
+            }
+
+            if((flag & VPROFILE_COLLECT_DATAOBJ) != 0) {
+                drcctlib_init_ex(opts->filter, INVALID_FILE, InstrumentInsCallback, NULL, NULL, DRCCTLIB_COLLECT_DATA_CENTRIC_MESSAGE | DRCCTLIB_CACHE_MODE);
+            } else if((flag & VPROFILE_COLLECT_CCT) != 0) {
+                /* Currently, DRCCTLIB_CACHE_MODE is specified to implement mem_ref only traces */
+                // drcctlib_init_ex(filter, INVALID_FILE, InstrumentInsCallback, NULL, NULL, DRCCTLIB_CACHE_MODE);
+                // We use the default mode for CCT-only for correctness
+                // TODO: Modify DRCCTLib to support more flex cache mode implementation
+                drcctlib_init_ex(opts->filter, INVALID_FILE, InstrumentInsCallback, NULL, NULL, DRCCTLIB_DEFAULT);
+            }
+        }
     }
+
 #ifdef X86
     drmgr_priority_t thread_init_pri = { sizeof(thread_init_pri),
                                          "vprofile-thread-init", NULL, NULL,
@@ -1828,28 +1994,24 @@ bool vprofile_init(bool (*filter)(instr_t *),
     if(!drvector_init(&vtrace_t_list, 1, false /*!synch*/, NULL)) {
         DR_ASSERT_MSG(false, "ERROR: vprofile unable to init drvector");
     }
-
-    if(flag == VPROFILE_DEFAULT) {
-        if(!drmgr_register_bb_instrumentation_event(event_basic_block_default, NULL, NULL)) {
-            DR_ASSERT_MSG(false, "ERROR: vprofile unable to register events");
-        }
-        return true;
-    }
-
-    if((flag & (VPROFILE_COLLECT_DATAOBJ_TREE_BASED | VPROFILE_COLLECT_DATAOBJ_ADDR_RANGE)) != 0) {
-        DR_ASSERT_MSG(false, "Not Implemented for VPROFILE_COLLECT_DATAOBJ_TREE_BASED and VPROFILE_COLLECT_DATAOBJ_ADDR_RANGE modes!");
-    }
-
-    if((flag & VPROFILE_COLLECT_DATAOBJ) != 0) {
-        drcctlib_init_ex(filter, INVALID_FILE, InstrumentInsCallback, NULL, NULL, DRCCTLIB_COLLECT_DATA_CENTRIC_MESSAGE | DRCCTLIB_CACHE_MODE);
-    } else if((flag & VPROFILE_COLLECT_CCT) != 0) {
-        /* Currently, DRCCTLIB_CACHE_MODE is specified to implement mem_ref only traces */
-        // drcctlib_init_ex(filter, INVALID_FILE, InstrumentInsCallback, NULL, NULL, DRCCTLIB_CACHE_MODE);
-        // We use the default mode for CCT-only for correctness
-        // TODO: Modify DRCCTLib to support more flex cache mode implementation
-        drcctlib_init_ex(filter, INVALID_FILE, InstrumentInsCallback, NULL, NULL, DRCCTLIB_DEFAULT);
-    }
     return true;
+}
+
+bool vprofile_init(bool (*filter)(instr_t *),
+                   void* (*user_data_cb)(void *, instr_t *, instrlist_t *, opnd_t),
+                   void (*ins_instrument_cb)(void *, instr_t *, instrlist_t *),
+                   void (*bb_instrument_cb)(void *, instrlist_t *),
+                   uint8_t flag)
+{
+    vprofile_options_t opts = { 0 };
+    opts.filter = 0;
+    opts.user_data_cb = user_data_cb;
+    opts.ins_instrument_cb = ins_instrument_cb;
+    opts.bb_instrument_cb = bb_instrument_cb;
+    opts.flag = flag;
+    opts.win_disable = WINDOW_DISABLE_DEFAULT;
+    opts.win_enable = WINDOW_ENABLE_DEFAULT;
+    return vprofile_init_ex(&opts);
 }
 
 void vprofile_exit()
@@ -1865,9 +2027,10 @@ void vprofile_exit()
     LOG_FINI();
     dr_close_file(gDebug);
 #endif
-    if(global_flags != VPROFILE_DEFAULT)
+    if(enable_cct)
         drcctlib_exit();
-    else drmgr_unregister_bb_instrumentation_event(event_basic_block_default);
+    else if(!enable_bursty_sampling) 
+        drmgr_unregister_bb_instrumentation_event(event_basic_block_default);
     drvector_delete(&vtrace_t_list);
     vtracer_exit();
 }
@@ -1897,6 +2060,7 @@ vtrace_t* vprofile_allocate_trace(uint32_t trace_flag)
     return new_trace;
 }
 
+#ifdef NO_PERIODICAL_SAMPLING
 template<int sz>
 void vprofile_update_VCAI_cb(void *buf_base, void *buf_end, void* user_data)
 {
@@ -2129,6 +2293,246 @@ void vprofile_update_A_cb(void *buf_base, void *buf_end, void* user_data)
         (*((void (*)(val_info_t *)) user_data))(&user_info);
     }
 }
+
+#else
+
+template<int sz>
+void vprofile_update_VCAI_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_VCAI_sz_t<sz>* cache_ptr = (cache_VCAI_sz_t<sz>*)buf_base;
+    cache_VCAI_sz_t<sz>* cache_end = (cache_VCAI_sz_t<sz>*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.addr = cache_ptr->addr;
+        user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
+        user_info.val = (void *) cache_ptr->val;
+        user_info.info = cache_ptr->user_data;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
+template<int sz>
+void vprofile_update_VCI_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_VCI_sz_t<sz>* cache_ptr = (cache_VCI_sz_t<sz>*)buf_base;
+    cache_VCI_sz_t<sz>* cache_end = (cache_VCI_sz_t<sz>*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
+        user_info.val = (void *) cache_ptr->val;
+        user_info.info = cache_ptr->user_data;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
+template<int sz>
+void vprofile_update_VCA_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_VCA_sz_t<sz>* cache_ptr = (cache_VCA_sz_t<sz>*)buf_base;
+    cache_VCA_sz_t<sz>* cache_end = (cache_VCA_sz_t<sz>*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.addr = cache_ptr->addr;
+        user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
+        user_info.val = (void *) cache_ptr->val;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
+template<int sz>
+void vprofile_update_VC_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_VC_sz_t<sz>* cache_ptr = (cache_VC_sz_t<sz>*)buf_base;
+    cache_VC_sz_t<sz>* cache_end = (cache_VC_sz_t<sz>*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
+        if(!drcctlib_ctxt_hndl_is_valid(cache_ptr->ctxt_hndl)) {
+            VTRACER_EXIT_PROCESS("CTXT_HNDL not valid: %d\n", cache_ptr->ctxt_hndl);
+        }
+        user_info.val = (void *) cache_ptr->val;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
+template<int sz>
+void vprofile_update_VAI_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_VAI_sz_t<sz>* cache_ptr = (cache_VAI_sz_t<sz>*)buf_base;
+    cache_VAI_sz_t<sz>* cache_end = (cache_VAI_sz_t<sz>*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.addr = cache_ptr->addr;
+        user_info.val = (void *) cache_ptr->val;
+        user_info.info = cache_ptr->user_data;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
+template<int sz>
+void vprofile_update_VA_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_VA_sz_t<sz>* cache_ptr = (cache_VA_sz_t<sz>*)buf_base;
+    cache_VA_sz_t<sz>* cache_end = (cache_VA_sz_t<sz>*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.addr = cache_ptr->addr;
+        user_info.val = (void *) cache_ptr->val;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
+template<int sz>
+void vprofile_update_VI_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_VI_sz_t<sz>* cache_ptr = (cache_VI_sz_t<sz>*)buf_base;
+    cache_VI_sz_t<sz>* cache_end = (cache_VI_sz_t<sz>*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.val = (void *) cache_ptr->val;
+        user_info.info = cache_ptr->user_data;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
+template<int sz>
+void vprofile_update_V_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_V_sz_t<sz>* cache_ptr = (cache_V_sz_t<sz>*)buf_base;
+    cache_V_sz_t<sz>* cache_end = (cache_V_sz_t<sz>*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.val = (void *) cache_ptr->val;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
+void vprofile_update_CAI_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_CAI_t* cache_ptr = (cache_CAI_t*)buf_base;
+    cache_CAI_t* cache_end = (cache_CAI_t*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.addr = cache_ptr->addr;
+        user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
+        user_info.info = cache_ptr->user_data;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
+void vprofile_update_CA_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_CA_t* cache_ptr = (cache_CA_t*)buf_base;
+    cache_CA_t* cache_end = (cache_CA_t*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.addr = cache_ptr->addr;
+        user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
+void vprofile_update_CI_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_CI_t* cache_ptr = (cache_CI_t*)buf_base;
+    cache_CI_t* cache_end = (cache_CI_t*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
+        user_info.info = cache_ptr->user_data;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
+void vprofile_update_AI_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_AI_t* cache_ptr = (cache_AI_t*)buf_base;
+    cache_AI_t* cache_end = (cache_AI_t*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.addr = cache_ptr->addr;
+        user_info.info = cache_ptr->user_data;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
+void vprofile_update_A_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_A_t* cache_ptr = (cache_A_t*)buf_base;
+    cache_A_t* cache_end = (cache_A_t*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.addr = cache_ptr->addr;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
+#endif
 
 template <typename T, bool trace_before_write>
 size_t
@@ -2584,4 +2988,8 @@ void vprofile_unregister_trace(vtrace_t *vtrace)
         }
     }
     dr_global_free(vtrace, sizeof(*vtrace));
+}
+
+void vprofile_set_period_sampling_window(int window) {
+    global_analysis_period = window;
 }

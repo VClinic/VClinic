@@ -34,7 +34,7 @@
 #include "shadow_memory_lock.h"
 #include "drcctlib_hpcviewer_format.h"
 #include "dr_tools.h"
-#include "vprofile.h"
+#include "utils.h"
 
 using namespace std;
 
@@ -64,6 +64,22 @@ using namespace std;
 #define MAX_ALIAS_REGS (16)  //EAX, EBX, ECX, EDX, EBP, EDI, ESI, ESP, R8-R15
 #define MAX_ALIAS_REG_SIZE (8) //RAX is 64bits
 #define MAX_ALIAS_TYPE (3) //(RAX, EAX, AX),(AH),(AL)
+
+#ifdef ARM_CCTLIB
+#    define OPND_CREATE_CCT_INT OPND_CREATE_INT
+#else
+#    define OPND_CREATE_CCT_INT OPND_CREATE_INT32
+#endif
+
+#ifdef ARM_CCTLIB
+#    define OPND_CREATE_IMMEDIATE_INT OPND_CREATE_INT
+#else
+#    ifdef CCTLIB_64
+#        define OPND_CREATE_IMMEDIATE_INT OPND_CREATE_INT64
+#    else
+#        define OPND_CREATE_IMMEDIATE_INT OPND_CREATE_INT32
+#    endif
+#endif
 
 #ifdef AARCH64
     // 64 BIT: X0-X30 XSP XZR
@@ -141,52 +157,38 @@ struct LargeReg{
 
 // Client Options
 #include "droption.h"
-#define WINDOW_ENABLE 10000
-#define WINDOW_DISABLE 1000000
-
-int win_enable;
-int win_disable;
-
-static droption_t<bool> op_enable_sampling
-(DROPTION_SCOPE_CLIENT, "enable_sampling", 0, 0, 64, "Enable Bursty Sampling",
- "Enable bursty sampling for lower overhead with less profiling accuracy.");
-
-static droption_t<bool> op_enable_opnd_sampling
-(DROPTION_SCOPE_CLIENT, "enable_opnd_sampling", 0, 0, 64, "Enable Operand-level Bursty Sampling",
- "Enable bursty sampling for lower overhead with less profiling accuracy.");
-
-static droption_t<bool> op_enable_period_sampling
-(DROPTION_SCOPE_CLIENT, "enable_period_sampling", 0, 0, 64, "Enable Operand-level Periodical Sampling",
- "Enable periodical sampling for lower overhead with less profiling accuracy.");
-
-static droption_t<int> op_period
-(DROPTION_SCOPE_CLIENT, "period", 100, 1, 10000, "Periodical window size of Operand-level Periodical Sampling",
- "Periodical window size of Operand-level Periodical Sampling.");
-
-static droption_t<int> op_window
-(DROPTION_SCOPE_CLIENT, "window", WINDOW_DISABLE, 0, INT32_MAX, "Window size configuration of sampling",
- "Window size of sampling. Only available when sampling is enabled.");
-
-static droption_t<int> op_window_enable
-(DROPTION_SCOPE_CLIENT, "window_enable", WINDOW_ENABLE, 0, INT32_MAX, "Window enabled size configuration of sampling",
- "Window enabled size of sampling. Only available when sampling is enabled.");
-
-static droption_t<bool> op_help
-(DROPTION_SCOPE_CLIENT, "help", 0, 0, 64, "Show this help",
- "Show this help.");
 
  #define REDSPY_EXIT_PROCESS(format, args...)                                           \
     DRCCTLIB_CLIENT_EXIT_PROCESS_TEMPLATE("redspy", format, \
                                           ##args)
 
-// We only interest in memory stores
-bool 
-VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
-    uint32_t mask1 = (ANY_DATA_TYPE | GPR_REGISTER | SIMD_REGISTER | WRITE | AFTER);
-    uint32_t mask2 = (ANY_DATA_TYPE | MEMORY | WRITE | BEFORE | AFTER);
-    return ((mask1 & opmask) == opmask) || ((mask2 &opmask) == opmask);
+bool instr_is_ignorable(instr_t *ins) {
+    int opc = instr_get_opcode(ins);
+#ifdef AARCH64
+    if(instr_is_exclusive_load(ins) || instr_is_exclusive_store(ins)) {
+        return false;
+    }
+#endif
+    switch (opc) {
+        case OP_nop:
+#ifdef X86
+	    case OP_nop_modrm:
+#endif
+
+#if defined(AARCH64)
+        case OP_isb:
+        case OP_ld3:
+        case OP_ld3r:
+#endif
+                return true;
+        default:
+                return false;
+    }
+
+    return false;
 }
 
+// We only interest in memory stores
 bool REDSPY_FILTER_MEM_ACCESS_INSTR(instr_t *instr) {
     if(instr_is_call(instr)) return false;
     if(instr_is_prefetch(instr)) return false;
@@ -249,6 +251,8 @@ typedef struct _per_thread_t {
 
     file_t output_file;
     int32_t threadId;
+
+    vector<opnd_t*> *opnd_clones;
 } per_thread_t;
 
 file_t gTraceFile;
@@ -262,8 +266,6 @@ int redspy_metric_id = 0;
 uint64_t grandTotBytesWritten;
 uint64_t grandTotBytesRedWritten;
 uint64_t grandTotBytesApproxRedWritten;
-
-vtrace_t* vtrace;
 
 enum {
     INSTRACE_TLS_OFFS_BUF_PTR,
@@ -943,7 +945,7 @@ void InstrumentReadValueBeforeAndAfterWriting(int size, int esize, bool is_float
         if(is_float) {
             switch(size) {
                 case 1:
-                case 2: DR_ASSERT_MSG(false, "trace_update_cb: memory write floating data with unexptected small size.\n");
+                case 2: break;
                 case 4: RedSpyAnalysis<float, 4, readBufferSlotIndex,true>::RecordNByteValueBeforeWrite(val, pt); break;
                 case 8: RedSpyAnalysis<double, 8, readBufferSlotIndex,true>::RecordNByteValueBeforeWrite(val, pt); break;
                 case 10: RedSpyAnalysis<uint8_t, 10, readBufferSlotIndex,true>::RecordNByteValueBeforeWrite(val, pt); break;
@@ -951,7 +953,9 @@ void InstrumentReadValueBeforeAndAfterWriting(int size, int esize, bool is_float
                     switch(esize) {
                         case 4: RedSpyAnalysis<float, 16, readBufferSlotIndex,true>::RecordNByteValueBeforeWrite(val, pt); break;
                         case 8: RedSpyAnalysis<double, 16, readBufferSlotIndex,true>::RecordNByteValueBeforeWrite(val, pt); break;
-                        default: DR_ASSERT_MSG(false, "InstrumentReadValueBeforeAndAfterWriting: handle large mem write with large operand size\n"); break;
+                        default: {
+                            DR_ASSERT_MSG(false, "InstrumentReadValueBeforeAndAfterWriting: handle large mem write with large operand size\n"); break;
+                        }
                     }
                 }break;
                 case 32: {
@@ -978,7 +982,7 @@ void InstrumentReadValueBeforeAndAfterWriting(int size, int esize, bool is_float
         if(is_float) {
             switch(size) {
                 case 1:
-                case 2: DR_ASSERT_MSG(false, "trace_update_cb: memory write floating data with unexptected small size.\n");
+                case 2: break;
                 case 4: RedSpyAnalysis<float, 4, readBufferSlotIndex,true>::ApproxCheckAfterWrite(addr, val, curCtxtHandle, pt); break;
                 case 8: RedSpyAnalysis<double, 8, readBufferSlotIndex,true>::ApproxCheckAfterWrite(addr, val, curCtxtHandle, pt); break;
                 case 10: RedSpyAnalysis<uint8_t, 10, readBufferSlotIndex,true>::ApproxCheckAfterWrite(addr, val, curCtxtHandle, pt); break;
@@ -1133,35 +1137,44 @@ void InstrumentReg(int size, int esize, bool is_float, void *addr, uint8_t* val,
 }
 #endif
 
-// template<int size, int esize, bool is_float>
-void trace_update_cb(val_info_t *info) {
-    per_thread_t* pt = (per_thread_t *)drmgr_get_tls_field(dr_get_current_drcontext(), tls_idx);
-    void* addr = (void*)info->addr;
-    int32_t cct = info->ctxt_hndl;
-    uint32_t type = info->type;
-    uint8_t *val = (uint8_t*)info->val;
-    int size = info->size;
-    int esize = info->esize;
-    bool is_float = info->is_float;
+template<uint32_t AccessLen, uint32_t ElemLen, bool isApprox, bool is_write, bool is_before>
+void CheckNByteValue(int slot, opnd_t *opnd)
+{
+    void *drcontext = dr_get_current_drcontext();
+    context_handle_t ctxt_hndl = drcctlib_get_context_handle(drcontext, slot);
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    
+    dr_mcontext_t mcontext;
+    mcontext.size = sizeof(mcontext);
+    mcontext.flags= DR_MC_ALL;
+    DR_ASSERT(dr_get_mcontext(drcontext, &mcontext));
 
-    // skip unknown ins's op
-    if(esize == 0) return;
-
-    if((TEST_OPND_MASK(type, GPR_REGISTER) || TEST_OPND_MASK(type, SIMD_REGISTER))) {
-        pt->bytesWritten += size;
-        InstrumentReg(size, esize, is_float, addr, val, cct, pt);
-    } else {
-        if(TEST_OPND_MASK(type, AFTER)) {
-            pt->bytesWritten += size;
+    pt->bytesWritten += AccessLen;
+    if(opnd_is_memory_reference(*opnd)) {
+        app_pc addr = opnd_compute_address(*opnd, &mcontext);
+        if(is_before) {
+            switch(pt->slotNum) {
+                case 0: InstrumentReadValueBeforeAndAfterWriting<0, true>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 1: InstrumentReadValueBeforeAndAfterWriting<1, true>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 2: InstrumentReadValueBeforeAndAfterWriting<2, true>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 3: InstrumentReadValueBeforeAndAfterWriting<3, true>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 4: InstrumentReadValueBeforeAndAfterWriting<4, true>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 5: InstrumentReadValueBeforeAndAfterWriting<5, true>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 6: InstrumentReadValueBeforeAndAfterWriting<6, true>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 7: InstrumentReadValueBeforeAndAfterWriting<7, true>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                default: DR_ASSERT_MSG(false, "CheckNByteValueAfterVGatherScatter: readBufferSlotIndex overflow!\n"); break;
+            }
+            pt->slotNum++;
+        } else {
             switch(pt->readBufferSlotIndex) {
-                case 0: InstrumentReadValueBeforeAndAfterWriting<0, false>(size, esize, is_float, addr, val, cct, pt); break;
-                case 1: InstrumentReadValueBeforeAndAfterWriting<1, false>(size, esize, is_float, addr, val, cct, pt); break;
-                case 2: InstrumentReadValueBeforeAndAfterWriting<2, false>(size, esize, is_float, addr, val, cct, pt); break;
-                case 3: InstrumentReadValueBeforeAndAfterWriting<3, false>(size, esize, is_float, addr, val, cct, pt); break;
-                case 4: InstrumentReadValueBeforeAndAfterWriting<4, false>(size, esize, is_float, addr, val, cct, pt); break;
-                case 5: InstrumentReadValueBeforeAndAfterWriting<5, false>(size, esize, is_float, addr, val, cct, pt); break;
-                case 6: InstrumentReadValueBeforeAndAfterWriting<6, false>(size, esize, is_float, addr, val, cct, pt); break;
-                case 7: InstrumentReadValueBeforeAndAfterWriting<7, false>(size, esize, is_float, addr, val, cct, pt); break;
+                case 0: InstrumentReadValueBeforeAndAfterWriting<0, false>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 1: InstrumentReadValueBeforeAndAfterWriting<1, false>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 2: InstrumentReadValueBeforeAndAfterWriting<2, false>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 3: InstrumentReadValueBeforeAndAfterWriting<3, false>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 4: InstrumentReadValueBeforeAndAfterWriting<4, false>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 5: InstrumentReadValueBeforeAndAfterWriting<5, false>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 6: InstrumentReadValueBeforeAndAfterWriting<6, false>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
+                case 7: InstrumentReadValueBeforeAndAfterWriting<7, false>(AccessLen, ElemLen, isApprox, addr, (uint8_t*)addr, ctxt_hndl, pt); break;
                 default: DR_ASSERT_MSG(false, "trace_update_cb: readBufferSlotIndex overflow!\n"); break;
             }
             pt->readBufferSlotIndex++;
@@ -1169,19 +1182,125 @@ void trace_update_cb(val_info_t *info) {
                 pt->readBufferSlotIndex = 0;
                 pt->slotNum = 0;
             }
-        } else {
-            switch(pt->slotNum) {
-                case 0: InstrumentReadValueBeforeAndAfterWriting<0, true>(size, esize, is_float, addr, val, cct, pt); break;
-                case 1: InstrumentReadValueBeforeAndAfterWriting<1, true>(size, esize, is_float, addr, val, cct, pt); break;
-                case 2: InstrumentReadValueBeforeAndAfterWriting<2, true>(size, esize, is_float, addr, val, cct, pt); break;
-                case 3: InstrumentReadValueBeforeAndAfterWriting<3, true>(size, esize, is_float, addr, val, cct, pt); break;
-                case 4: InstrumentReadValueBeforeAndAfterWriting<4, true>(size, esize, is_float, addr, val, cct, pt); break;
-                case 5: InstrumentReadValueBeforeAndAfterWriting<5, true>(size, esize, is_float, addr, val, cct, pt); break;
-                case 6: InstrumentReadValueBeforeAndAfterWriting<6, true>(size, esize, is_float, addr, val, cct, pt); break;
-                case 7: InstrumentReadValueBeforeAndAfterWriting<7, true>(size, esize, is_float, addr, val, cct, pt); break;
-                default: DR_ASSERT_MSG(false, "trace_update_cb: readBufferSlotIndex overflow!\n"); break;
+        }
+    } else {
+        DR_ASSERT(opnd_is_reg(*opnd));
+        reg_id_t reg = opnd_get_reg(*opnd);
+        byte val[sizeof(dr_zmm_t)];
+        DR_ASSERT(reg_get_value_ex(reg, &mcontext, val));
+        uint64_t addr = 0 | reg;
+        InstrumentReg(AccessLen, ElemLen, isApprox, (void*)addr, val, ctxt_hndl, pt);
+    }
+}
+
+template<bool is_write, bool is_before>
+void Instrument_impl(void *drcontext, instrlist_t *bb, instr_t *instr, instr_t *insert_where, int32_t slot, int size, int esize, bool is_float, int pos)
+{
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    opnd_t *opnd = new opnd_t(instr_get_dst(instr, pos));
+    pt->opnd_clones->push_back(opnd);
+
+    if(!is_float) {
+        switch(size) {
+            case 1: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<1,1,false,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 2: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<2,2,false,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 4: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<4,4,false,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 8: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<8,8,false,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 16: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<16,16,false,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 32: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<32,32,false,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 64: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<64,64,false,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            default: {
+                printf("\nERROR: size for instruction is too large: %d!\n", size);
+                printf("^^ Disassembled Instruction ^^^\n");
+                disassemble(drcontext, instr_get_app_pc(instr), 1/*sdtout file desc*/);
+                printf("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n");
+                fflush(stdout);
+                assert(0 && "unexpected large size\n"); break;
             }
-            pt->slotNum++;
+        }
+    } else {
+        switch(size) {
+            case 2: break;
+            case 4: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<4,4,true,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            case 8: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<8,8,true,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+            // 128-bit, AVX, SSE
+            case 16: {
+                switch(esize) {
+                    case 4: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<16,4,true,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+                    case 8: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<16,8,true,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+                    default: {
+                        dr_fprintf(STDERR, "esize=%d\n", esize);
+			break;
+                        assert(0 && "handle large mem read with unexpected operand size\n");
+                    }break;
+                }
+            }break;
+            case 28: break;
+            // 256-bit, AVX2
+            case 32: {
+                switch(esize) {
+                    case 4: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<32,4,true,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+                    case 8: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<32,8,true,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+                    default: assert(0 && "handle large mem read with unexpected operand size\n"); break;
+                }
+            }break;
+            // 512-bit, AVX512
+            case 64: {
+                switch(esize) {
+                    case 4: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<64,4,true,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+                    case 8: dr_insert_clean_call(drcontext, bb, insert_where, (void*)CheckNByteValue<64,8,true,is_write,is_before>, false, 2, OPND_CREATE_CCT_INT(slot), OPND_CREATE_INTPTR(opnd));break;
+                    default: assert(0 && "handle large mem read with unexpected operand size\n"); break;
+                }
+            }break;
+            default: {
+                printf("\nERROR: size for instruction is too large: %d!\n", size);
+                printf("^^ Disassembled Instruction ^^^\n");
+                disassemble(drcontext, instr_get_app_pc(instr), 1/*sdtout file desc*/);
+                printf("^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n");
+                fflush(stdout);
+                assert(0 && "unexpected large size\n"); break;
+            }
+        }
+    }
+}
+
+void
+InstrumentInsCallback(void *drcontext, instr_instrument_msg_t *instrument_msg)
+{
+    instrlist_t *bb = instrument_msg->bb;
+    instr_t *instr = instrument_msg->instr;
+    int32_t slot = instrument_msg->slot;
+
+    if(!instr_is_app(instr) || instr_is_ignorable(instr)) return;
+
+    // to-do:vgather & scatter
+
+    per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    // instr_t* ins_clone = instr_clone(drcontext, instr);
+    // pt->instr_clones->push_back(ins_clone);
+
+    int num = instr_num_dsts(instr);
+    for(int j = 0; j < num; j++) {
+        opnd_t opnd = instr_get_dst(instr, j);
+        int size = opnd_size_in_bytes(opnd_get_size(opnd));
+        if(size != 0) {
+            instr_t *insert_where = instr_get_next_app(instr);
+            if(!insert_where) continue;
+            if(opnd_is_memory_reference(opnd)) {
+                bool is_float = opnd_is_floating(instr, opnd);
+                int esize = is_float ? FloatOperandSizeTable(instr, opnd) : IntegerOperandSizeTable(instr, opnd);
+                if(!esize) continue;
+                Instrument_impl<true, true>(drcontext, bb, instr, instr, slot, size, esize, is_float, j);
+                Instrument_impl<true, false>(drcontext, bb, instr, insert_where, slot, size, esize, is_float, j);
+            } else if(opnd_is_reg(opnd)) {
+                reg_id_t opnd_reg = opnd_get_reg(opnd);
+                if(reg_is_gpr(opnd_reg) || reg_is_simd(opnd_reg)) {
+                    bool is_float = opnd_is_floating(instr, opnd);
+                    int esize = is_float ? FloatOperandSizeTable(instr, opnd) : IntegerOperandSizeTable(instr, opnd);
+                    if(!esize) continue;
+                    Instrument_impl<true, false>(drcontext, bb, instr, insert_where, slot, size, esize, is_float, j);
+                }
+            }
         }
     }
 }
@@ -1379,6 +1498,7 @@ ClientThreadEnd(void *drcontext)
     PrintApproximationRedundancyPairs(pt);
 
     dr_close_file(pt->output_file);
+    delete pt->opnd_clones;
     delete pt->RedMap;
     delete pt->ApproxRedMap;
     dr_thread_free(drcontext, pt, sizeof(per_thread_t));
@@ -1393,11 +1513,6 @@ ThreadOutputFileInit(per_thread_t *pt)
     sprintf(name + strlen(name), "%s/thread-%d.topn.log", g_folder_name.c_str(), id);
     pt->output_file = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(pt->output_file != INVALID_FILE);
-    if (op_enable_sampling.get_value()) {
-        dr_fprintf(pt->output_file, "[REDSPY INFO] Sampling Enabled\n");
-    } else {
-        dr_fprintf(pt->output_file, "[REDSPY INFO] Sampling Disabled\n");
-    }
 }
 
 static void
@@ -1408,6 +1523,7 @@ ClientThreadStart(void *drcontext)
         REDSPY_EXIT_PROCESS("pt == NULL");
     }
     pt->bytesWritten = 0;
+    pt->opnd_clones = new vector<opnd_t*>();
     pt->RedMap = new unordered_map<uint64_t, uint64_t>();
     pt->ApproxRedMap = new unordered_map<uint64_t, uint64_t>();
     pt->readBufferSlotIndex = 0;
@@ -1440,8 +1556,10 @@ ClientExit(void)
         fflush(stdout);
         exit(-1);
     }
-    vprofile_unregister_trace(vtrace);
-    vprofile_exit();
+    drcctlib_exit();
+    drutil_exit();
+    drreg_exit();
+    drmgr_exit();
 }
 
 static void ClientInit(int argc, const char* argv[]) {
@@ -1493,45 +1611,17 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     dr_set_client_name("DynamoRIO Client 'redspy'",
                        "http://dynamorio.org/issues");
     ClientInit(argc, argv);
-    win_enable = op_window_enable.get_value();
-    win_disable = op_window.get_value();
-    vprofile_options_t vprofile_opts;
-    vprofile_opts.win_disable = win_disable;
-    vprofile_opts.win_enable = win_enable;
-    vprofile_opts.filter = REDSPY_FILTER_MEM_ACCESS_INSTR;
-    vprofile_opts.user_data_cb = NULL;
-    vprofile_opts.ins_instrument_cb = NULL;
-    vprofile_opts.bb_instrument_cb = NULL;
 
-    uint8_t ex_flag = VPROFILE_COLLECT_CCT;
-    uint32_t ex_trace_flag = VPROFILE_TRACE_CCT;
-    if (op_enable_sampling.get_value()) {
-        dr_fprintf(STDOUT, "[CLIENT LOG] sampling enabled!\n");
-        vprofile_opts.flag = VPROFILE_SAMPLE_BURSTY_INSTRUCTION | ex_flag;
-        vprofile_init_ex(&vprofile_opts);
-    } else if(op_enable_opnd_sampling.get_value()) {
-        dr_fprintf(STDOUT, "[CLIENT LOG] operand sampling enabled!\n");
-        vprofile_opts.flag = VPROFILE_SAMPLE_BURSTY_OPERAND | ex_flag;
-        vprofile_init_ex(&vprofile_opts);
-    } else if(op_enable_period_sampling.get_value()) {
-        int window = op_period.get_value();
-        dr_fprintf(STDOUT, "[CLIENT LOG] periodical sampling enabled: window=%d!\n", window);
-        vprofile_opts.flag = VPROFILE_SAMPLE_PERIODICAL_OPERAND | ex_flag;
-        vprofile_init_ex(&vprofile_opts);
-        vprofile_set_period_sampling_window(window);
-    } else {
-        vprofile_opts.flag = VPROFILE_DEFAULT | ex_flag;
-        vprofile_init_ex(&vprofile_opts);
+    if (!drmgr_init()) {
+        REDSPY_EXIT_PROCESS("ERROR: zerospy unable to initialize drmgr");
     }
-
-    // if(!vprofile_init(REDSPY_FILTER_MEM_ACCESS_INSTR, NULL, NULL, NULL,
-    //                  VPROFILE_COLLECT_CCT)) {
-    //     REDSPY_EXIT_PROCESS("ERROR: redspy unable to initialize vprofile");
-    // }
-
-    // if(op_enable_sampling.get_value()) {
-    //     vtracer_enable_sampling(op_window_enable.get_value(), op_window.get_value());
-    // }
+    drreg_options_t ops = { sizeof(ops), 4 /*max slots needed*/, false };
+    if (drreg_init(&ops) != DRREG_SUCCESS) {
+        DR_ASSERT_MSG(false, "ERROR: vtracer unable to initialize drreg");
+    }
+    if (!drutil_init()) {
+        DR_ASSERT_MSG(false, "ERROR: vtracer unable to initialize drutil");
+    }
 
     drmgr_priority_t thread_init_pri = { sizeof(thread_init_pri),
                                          "redspy-thread-init", NULL, NULL,
@@ -1555,12 +1645,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     }
     gLock = dr_mutex_create();
 
-    vtrace = vprofile_allocate_trace(VPROFILE_TRACE_VAL_CCT_ADDR | VPROFILE_TRACE_BEFORE_WRITE | VPROFILE_TRACE_STRICTLY_ORDERED | ex_trace_flag);
-
-    uint32_t opnd_mask = (ANY_DATA_TYPE | GPR_REGISTER | SIMD_REGISTER | MEMORY | WRITE | BEFORE | AFTER);
-
-    // Tracing Buffer
-    vprofile_register_trace_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, ANY, trace_update_cb);
+    drcctlib_init_ex(REDSPY_FILTER_MEM_ACCESS_INSTR, INVALID_FILE, InstrumentInsCallback, NULL, NULL, DRCCTLIB_DEFAULT);
 
     dr_register_exit_event(ClientExit);
 }
