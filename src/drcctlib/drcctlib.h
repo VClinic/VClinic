@@ -20,7 +20,8 @@ enum {
     DRCCTLIB_CACHE_MODE = 0x01,
     DRCCTLIB_COLLECT_DATA_CENTRIC_MESSAGE = 0x02,
     DRCCTLIB_CACHE_MEMEORY_ACCESS_ADDR = 0x04,
-    DRCCTLIB_CACHE_EXCEPTION = 0x08
+    DRCCTLIB_CACHE_EXCEPTION = 0x08,
+    DRCCTLIB_SAMPLE_EX_MODE = 0x10
 };
 
 enum {
@@ -257,5 +258,26 @@ drcctlib_get_full_cct_of_datacentric_nodes(datacentric_node_t datacentric_node);
 DR_EXPORT
 inner_context_t *
 drcctlib_get_full_cct_of_static_datacentric_nodes(int index);
+
+DR_EXPORT
+void
+drcctlib_analyse_orig_bb(void *drcontext, void *tag, instrlist_t *bb, void *user_data,
+                void **orig_analysis_data);
+
+DR_EXPORT
+void
+drcctlib_destroy_orig_analysis(void *drcontext, void *user_data, void *orig_analysis_data);
+
+DR_EXPORT
+int32_t
+drcctlib_query_slot(void *orig_analysis_data, instr_t* instr);
+
+DR_EXPORT
+void
+drcctlib_instr_bb_cached(void *drcontext, instrlist_t *bb, instr_t *instr, void *orig_analysis_data);
+
+DR_EXPORT
+void
+drcctlib_instr_bb_sampled(void *drcontext, instrlist_t *bb, instr_t *instr, void *orig_analysis_data);
 
 #endif // _DRCCTLIB_H_

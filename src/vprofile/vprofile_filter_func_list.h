@@ -34,7 +34,9 @@ VPROFILE_FILTER_MEM_WRITE_INSTR(instr_t *instr)
 DR_EXPORT
 bool 
 VPROFILE_FILTER_ALL_OPND(opnd_t opnd, vprofile_src_t opmask) {
-    return true;
+    uint32_t user_mask = (VPROFILE_OPND_MASK_ALL);
+    return ((user_mask & opmask) == opmask);
+    // return true;
 }
 
 #define VPROFILE_DEFAULT_OPND_FILTER VPROFILE_FILTER_ALL_OPND

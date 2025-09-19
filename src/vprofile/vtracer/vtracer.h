@@ -8,6 +8,8 @@
 #define VTRACER_LOG(level, format, args...)
 #endif
 
+#include "drbbdup.h"
+
 enum {
     /** Priority of drx_buf thread init event */
     DRMGR_PRIORITY_THREAD_INIT_TRACE_BUF = -7500,
@@ -36,14 +38,47 @@ typedef struct {
     reg_id_t tls_seg;
 } vtrace_buffer_t;
 
+enum vtracer_sample_mode_t {
+    VTRACER_NO_SAMPLE = 0,
+    VTRACER_BURSTY_SAMPLE_INSRUCTION,
+    VTRACER_BURSTY_SAMPLE_OPERAND,
+    VTRACER_SAMPLE_EX,
+};
+
+typedef void(* vtracer_instrument_bb_entry_t) (void *drcontext, instrlist_t *bb, instr_t *where, void *orig_analysis_data);
+typedef void(* vtracer_instrument_instr_t) (void *drcontext, void *tag, instrlist_t *bb, instr_t *instr, instr_t *where, void *user_data, void *orig_analysis_data);
+
+
+typedef struct {
+    vtracer_sample_mode_t mode;
+    int win_enable;
+    int win_disable;
+    drbbdup_set_up_bb_dups_t set_up_bb_dups;
+    drbbdup_insert_encode_t insert_encode;
+    drbbdup_analyze_orig_t analyse_orig_bb;
+    drbbdup_destroy_orig_analysis_t destroy_orig_analysis;
+    opnd_t sample_memory_opnd;
+} vtracer_options_t;
+
 /* VTracer Interface Functions */
 
 /* Initialize VTracer. Return false when any failure detected. */
 DR_EXPORT
-bool vtracer_init(void);
+bool vtracer_init_ex(vtracer_options_t *opts);
+
+DR_EXPORT
+bool vtracer_init();
 /* Clear and free all the resourced allocated by VTracer. */
 DR_EXPORT
 void vtracer_exit(void);
+
+/* Register callbacks for sampled instrumentation */
+DR_EXPORT
+void vtracer_register_sampled_callback(drbbdup_analyze_orig_t bb_analysis,
+                                       drbbdup_destroy_orig_analysis_t destroy_bb_analysis,
+                                       vtracer_instrument_bb_entry_t instrument_bb_entry_sampled,
+                                       vtracer_instrument_bb_entry_t instrument_bb_entry_original,
+                                       vtracer_instrument_instr_t instrument_instr);
 
 /**
  * Create trace buffer with size specified as buffer_size:
@@ -200,6 +235,16 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
                               instrlist_t *ilist, opnd_t ref, reg_id_t reg_ptr,
                               reg_id_t scratch, ushort offset);
 
+DR_EXPORT
+void vtracer_insert_trace_val_native(void *drcontext, instr_t *where,
+                              instrlist_t *ilist, opnd_t ref, reg_id_t reg_ptr,
+                              reg_id_t scratch, ushort offset);
+
+DR_EXPORT
+void vtracer_insert_trace_addr(void *drcontext, instr_t *where,
+                              instrlist_t *ilist, opnd_t ref, reg_id_t reg_ptr, reg_id_t reg_addr,
+                              reg_id_t scratch, ushort offset);
+
 /**
  * Insert instrumentations to store the constant value of type T into
  * vtrace_buffer:
@@ -271,4 +316,10 @@ void vtracer_update_clean_call(void *drcontext, vtrace_buffer_t *buf, T cache) {
  * */
 DR_EXPORT
 bool instr_is_ignorable(instr_t *ins);
+
+#if defined(ARM) || defined(AARCH64)
+DR_EXPORT bool
+instr_is_ldstex(instr_t *instr);
+#endif
+
 #endif

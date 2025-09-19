@@ -9,7 +9,7 @@
 
 #ifdef DEBUG
     #define VTRACER_DEBUG
-    #define VTRACER_DEBUG_DETAIL
+    // #define VTRACER_DEBUG_DETAIL
 #endif
 
 #define ALIGNED(x, alignment) ((((ptr_uint_t)x) & ((alignment)-1)) == 0)
@@ -41,12 +41,15 @@ typedef struct {
 /* global TLS implementation */
 enum {
     INSTRACE_TLS_OFFS_BUF_PTR,
+    INSTRACE_TLS_OFFS_SAMPLE_STATE,
     INSTRACE_TLS_COUNT, /* total number of TLS slots allocated */
 };
 
 static int tls_idx;
 static uint tls_offs;
 static reg_id_t tls_seg;
+static opnd_t opnd_sample;
+static vtracer_sample_mode_t sample_mode;
 
 typedef struct {
     byte *numInsBuff;
@@ -59,6 +62,7 @@ static int window_disable = 0;
 
 /* holds per-client (also per-buf) information */
 static drvector_t clients;
+static drvector_t cb_list;
 /* A flag to avoid work when no buffers were ever created. */
 static bool any_bufs_created;
 
@@ -161,23 +165,6 @@ void vtracer_buffer_free(vtrace_buffer_t *buf)
     dr_global_free(buf, sizeof(*buf));
 }
 
-static void bb_update(int insCnt) {
-    void *drcontext = dr_get_current_drcontext();
-    ins_per_thread_t *pt = (ins_per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
-    uint64_t val = reinterpret_cast<uint64_t>(BUF_PTR(pt->numInsBuff, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR));
-    val += insCnt;
-    BUF_PTR(pt->numInsBuff, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR) = reinterpret_cast<byte*>(val);
-}
-
-static void bb_update_and_check(int insCnt) {
-    void *drcontext = dr_get_current_drcontext();
-    ins_per_thread_t *pt = (ins_per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
-    uint64_t val = reinterpret_cast<uint64_t>(BUF_PTR(pt->numInsBuff, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR));
-    val += insCnt;
-    if(val>=(uint64_t)window_disable) { val=val-(uint64_t)window_disable; }
-    BUF_PTR(pt->numInsBuff, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR) = reinterpret_cast<byte*>(val);
-}
-
 #if defined(ARM) || defined(AARCH64)
 #        define TRACE_LOAD_IMM32_0(dc, Rt, imm) \
             INSTR_CREATE_movz((dc), (Rt), (imm), OPND_CREATE_INT(0))
@@ -241,7 +228,7 @@ void debug_scratch_check(vtrace_buffer_t *buf, int scr, int i) {
     DR_ASSERT_MSG(data->scratch==0, "Usage Error: Estimated filled num not matched for actual fill num.");
     data->scratch = scr;
 #ifdef VTRACER_DEBUG_DETAIL
-    dr_fprintf(STDOUT, "buf %d next scratch = %d\n", i, data->scratch);
+    dr_fprintf(STDOUT, "buf %d next scratch = %d [%p]\n", i, data->scratch, data);
 #endif
 }
 
@@ -260,48 +247,7 @@ static void insert_buf_check(void *drcontext, instrlist_t *bb, instr_t *ins, ush
     RESERVE_AFLAGS(drcontext, bb, ins);
 #endif
     RESERVE_REG(drcontext, bb, ins, NULL, reg_ptr);
-#if defined(ARM) || defined(AARCH64)
-    // for ARM, we always need two register for the check of bursty sampling.
     RESERVE_REG(drcontext, bb, ins, NULL, reg_end);
-#endif
-    instr_t* skip_to_end = INSTR_CREATE_label(drcontext);
-    if (enable_sampling) {
-        instr_t* skip_to_update = INSTR_CREATE_label(drcontext);
-        dr_insert_read_raw_tls(drcontext, bb, ins, tls_seg, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR, reg_ptr);
-        // TODO: use JECXZ (x86)/TBZ (arm) for aflag-free comparison & conditional jump
-        // Clear insCnt when insCnt > WINDOW_DISABLE
-#if defined(ARM) || defined(AARCH64)
-    #ifdef AARCH64
-        minstr_load_wwint_to_reg(drcontext, bb, ins, reg_end, window_enable);
-        MINSERT(bb, ins, XINST_CREATE_sub(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
-        // if reg_ptr > reg_end, the top bit of (reg_ptr-reg_end) will be 0
-        MINSERT(bb, ins, INSTR_CREATE_tbnz(drcontext, opnd_create_instr(skip_to_update),
-                                /* If the top bit is still zero, skip the call. */
-                                opnd_create_reg(reg_ptr), OPND_CREATE_INT(63)));
-    #else
-        minstr_load_wint_to_reg(drcontext, bb, ins, reg_end, window_enable);
-        MINSERT(bb, ins, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
-        MINSERT(bb, ins, XINST_CREATE_jump_cond(drcontext, DR_PRED_LE, opnd_create_instr(skip_to_update)));
-    #endif
-#else
-        MINSERT(bb, ins, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(window_enable)));
-        MINSERT(bb, ins, XINST_CREATE_jump_cond(drcontext, DR_PRED_LE, opnd_create_instr(skip_to_update)));
-#endif
-        // clear the buffer when not sampled
-        for (i = 0; i < clients.entries; ++i) {
-            vtrace_buffer_t *buf = (vtrace_buffer_t*)drvector_get_entry(&clients, i);
-            if (buf != NULL && buf->full_cb!=NULL && scratch[i]>0) {
-                vtracer_insert_clear_buf(drcontext, buf, bb, ins, reg_ptr/*scratch*/);
-            }
-        }
-        MINSERT(bb, ins, XINST_CREATE_jump(drcontext, opnd_create_instr(skip_to_end)));
-        // update when insCnt <= WINDOW_ENABLE?
-        MINSERT(bb, ins, skip_to_update);
-    }
-#if !defined(ARM) && !defined(AARCH64)
-    // for X86/64, we can lazily reserve the register to avoid unnecessary spilling.
-    RESERVE_REG(drcontext, bb, ins, NULL, reg_end);
-#endif
     // now check if any buffers are full and update if necessary
     for (i = 0; i < clients.entries; ++i) {
         vtrace_buffer_t *buf = (vtrace_buffer_t*)drvector_get_entry(&clients, i);
@@ -370,13 +316,7 @@ static void insert_buf_check(void *drcontext, instrlist_t *bb, instr_t *ins, ush
         }
     }
     // restore registers if reserved
-#if defined(ARM) || defined(AARCH64)
-    MINSERT(bb, ins, skip_to_end);
     UNRESERVE_REG(drcontext, bb, ins, reg_end);
-#else
-    UNRESERVE_REG(drcontext, bb, ins, reg_end);
-    MINSERT(bb, ins, skip_to_end);
-#endif
     UNRESERVE_REG(drcontext, bb, ins, reg_ptr);
 #ifndef AARCH64
     UNRESERVE_AFLAGS(drcontext, bb, ins);
@@ -403,8 +343,18 @@ event_basic_block(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, b
         }
     }
     // estimate the future fill in slot numbers of each buffer
+#if defined(ARM) || defined(AARCH64)
+    bool skip = false;
+#endif
     for (instr = instrlist_first(bb); instr != NULL; instr = instr_get_next(instr)) {
-        if(!instr_is_app(instr) || instr_is_ignorable(instr)) continue;
+        if(!instr_is_app(instr)) continue;
+#if defined(ARM) || defined(AARCH64)
+        if (!skip && (instr_is_exclusive_load(instr) || instr_is_ldstex(instr))) {
+            skip = true;
+        }
+        if (!skip) {
+#endif
+        if(instr_is_ignorable(instr)) continue;
         num_instructions++;
         for (i = 0; i < clients.entries; ++i) {
             vtrace_buffer_t *buf = (vtrace_buffer_t*)drvector_get_entry(&clients, i);
@@ -412,6 +362,12 @@ event_basic_block(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, b
                 scratch[i] += buf->fill_num_cb(drcontext, instr, buf->user_data_fill_num);
             }
         }
+#if defined(ARM) || defined(AARCH64)
+        }
+        if (skip && (instr_is_exclusive_store(instr) || instr_is_ldstex(instr))) {
+            skip = false;
+        }
+#endif
     }
     // quick return if it doesn't have any application instructions
     if(num_instructions==0) {
@@ -425,15 +381,7 @@ event_basic_block(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, b
         vtrace_buffer_t *buf = (vtrace_buffer_t*)drvector_get_entry(&clients, i);
         if (buf != NULL && buf->full_cb!=NULL && scratch[i]>0) {
             enable_check = true;
-        }
-    }
-    // if sampling enabled, we need to insert instruction counts
-    if (enable_sampling) {
-        // TODO: inline these simple cleancalls for lower overhead
-        if(enable_check) {
-            dr_insert_clean_call(drcontext, bb, insert_pt, (void *)bb_update_and_check, false, 1, OPND_CREATE_INT32(num_instructions));
-        } else {
-            dr_insert_clean_call(drcontext, bb, insert_pt, (void *)bb_update, false, 1, OPND_CREATE_INT32(num_instructions));
+            break;
         }
     }
     if (enable_check) {
@@ -451,6 +399,7 @@ event_thread_init(void *drcontext)
         ins_per_thread_t *pt = (ins_per_thread_t *)dr_thread_alloc(drcontext, sizeof(ins_per_thread_t));
         pt->numInsBuff = (byte*)dr_get_dr_segment_base(tls_seg);
         BUF_PTR(pt->numInsBuff, tls_offs) = 0;
+        BUF_PTR(pt->numInsBuff, tls_offs+sizeof(void *)*INSTRACE_TLS_OFFS_SAMPLE_STATE) = 0;
         drmgr_set_tls_field(drcontext, tls_idx, (void *)pt);
     }
     // allcoate tls field for each buffer
@@ -496,6 +445,417 @@ event_thread_exit(void *drcontext)
     }
 }
 
+struct bb_analysis_data_t {
+    int num_count;
+    ushort* scratch;
+    void** orig_analysis_data_list;
+    // Only available in ARM/AArch64
+    bool skip;
+};
+
+struct vtracer_sampled_cb_t {
+    drbbdup_analyze_orig_t bb_analysis;
+    drbbdup_destroy_orig_analysis_t destroy_bb_analysis;
+    vtracer_instrument_bb_entry_t instrument_bb_entry_sampled;
+    vtracer_instrument_bb_entry_t instrument_bb_entry_original;
+    vtracer_instrument_instr_t instrument_instr;
+};
+
+void vtracer_register_sampled_callback(drbbdup_analyze_orig_t bb_analysis,
+                                       drbbdup_destroy_orig_analysis_t destroy_bb_analysis,
+                                       vtracer_instrument_bb_entry_t instrument_bb_entry_sampled,
+                                       vtracer_instrument_bb_entry_t instrument_bb_entry_original,
+                                       vtracer_instrument_instr_t instrument_instr) {
+    if (tls_idx==-1) {
+        DR_ASSERT_MSG(false, "vtracer_register_sampled_callback should only be called when sampling is enabled.");
+    }
+
+    vtracer_sampled_cb_t* cb = (vtracer_sampled_cb_t*)dr_global_alloc(sizeof(vtracer_sampled_cb_t));
+    cb->bb_analysis = bb_analysis;
+    cb->destroy_bb_analysis = destroy_bb_analysis;
+    cb->instrument_bb_entry_sampled = instrument_bb_entry_sampled;
+    cb->instrument_bb_entry_original = instrument_bb_entry_original;
+    cb->instrument_instr = instrument_instr;
+    drvector_append(&cb_list, cb);
+}
+
+static uintptr_t
+set_up_bb_dups(void *drbbdup_ctx, void *drcontext, void *tag, instrlist_t *bb,
+               bool *enable_dups, bool *enable_dynamic_handling, void *user_data)
+{
+    /* Enable duplication for tracable basic blocks for sampling. */
+    // estimate the future fill in slot numbers of each buffer
+    unsigned int i;
+    instr_t *instr;
+    *enable_dups = false;
+#if defined(ARM) || defined(AARCH64)
+    bool skip = false;
+#endif
+    for (instr = instrlist_first(bb); instr != NULL; instr = instr_get_next(instr)) {
+        if(!instr_is_app(instr)) continue;
+#if defined(ARM) || defined(AARCH64)
+        if (!skip && (instr_is_exclusive_load(instr) || instr_is_ldstex(instr))) {
+            skip = true;
+        }
+        if (!skip) {
+#endif
+        if(instr_is_ignorable(instr)) continue;
+        for (i = 0; i < clients.entries; ++i) {
+            vtrace_buffer_t *buf = (vtrace_buffer_t*)drvector_get_entry(&clients, i);
+            if (buf != NULL && buf->full_cb!=NULL && 
+                buf->fill_num_cb(drcontext, instr, buf->user_data_fill_num)) {
+                *enable_dups = true;
+                goto dup_calc_exit;
+            }
+        }
+#if defined(ARM) || defined(AARCH64)
+        }
+        if (skip && (instr_is_exclusive_store(instr) || instr_is_ldstex(instr))) {
+            skip = false;
+        }
+#endif
+    }
+dup_calc_exit:
+    /* Disable dynamic handling. */
+    *enable_dynamic_handling = false;
+
+    /* Register the case encoding for counting the execution of hot basic blocks. */
+    drbbdup_register_case_encoding(drbbdup_ctx, (uintptr_t) 1 /* hot */);
+
+    /* Set the default case encoding for tracking the hit count of basic blocks. */
+    return 0; /* cold */
+}
+
+#ifdef VTRACER_DEBUG_DETAIL
+void debug_print_sample_state(uint64_t sample_state_reg, uint64_t sample_state_mem) {
+    void* drcontext = dr_get_current_drcontext();
+    ins_per_thread_t *pt = (ins_per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    uint64_t val = reinterpret_cast<uint64_t>(BUF_PTR(pt->numInsBuff, tls_offs + sizeof(void *) * INSTRACE_TLS_OFFS_BUF_PTR));
+    uint64_t sample_state = reinterpret_cast<uint64_t>(BUF_PTR(pt->numInsBuff, tls_offs + sizeof(void *) * INSTRACE_TLS_OFFS_SAMPLE_STATE));
+    int tid = dr_get_thread_id(drcontext);
+    //if(sample_state_reg!=1)
+    dr_fprintf(STDOUT, "[sample state] tid=%d, tls::num_counts=%ld, <enable,disable>=<%d,%d>, sample_state <reg,mem,tls>=<%ld,%ld,%ld>\n", tid, val, window_enable, window_disable, sample_state_reg, sample_state_mem, sample_state);
+    DR_ASSERT(sample_state_reg==sample_state_mem && sample_state_reg==sample_state && sample_state<2);
+}
+
+void debug_print_dbinfo(uint64_t val) {
+    void* drcontext = dr_get_current_drcontext();
+    int tid = dr_get_thread_id(drcontext);
+    dr_fprintf(STDOUT, "[debug] tid=%d, val=%ld\n", tid, val);
+}
+#endif
+
+static void
+insert_encode(void *drcontext, void *tag, instrlist_t *bb, instr_t *where,
+              void *user_data, void *orig_analysis_data)
+{
+    reg_id_t reg_ptr;
+    bb_analysis_data_t *bb_data = (bb_analysis_data_t*)orig_analysis_data;
+    int num_count = bb_data->num_count;
+    // reserve status and registers
+    // FIXED 0711: Although the aflags are already reserved by drbbdup, we still need to reserve the aflags for safety.
+#ifndef AARCH64
+    // AArch64 can be aflag-free branched with TBZ instruction
+    RESERVE_AFLAGS(drcontext, bb, where);
+#endif
+    RESERVE_REG(drcontext, bb, where, NULL, reg_ptr);
+#if defined(ARM) || defined(AARCH64)
+    reg_id_t reg_end;
+    // for ARM, we always need two register for the check of bursty sampling.
+    RESERVE_REG(drcontext, bb, where, NULL, reg_end);
+#endif
+    /* (1) LOAD COUNTER VALUE */
+    dr_insert_read_raw_tls(drcontext, bb, where, tls_seg, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR, reg_ptr);
+    /* (2) CHECK AND SET SAMPLE STATE opnd_sample */
+#if defined(ARM) || defined(AARCH64)
+    #ifdef AARCH64
+        minstr_load_wwint_to_reg(drcontext, bb, where, reg_end, window_enable);
+    #else
+        minstr_load_wint_to_reg(drcontext, bb, where, reg_end, window_enable);
+    #endif
+    // reg_end = reg_ptr - reg_end
+    MINSERT(bb, where, INSTR_CREATE_sub(drcontext, opnd_create_reg(reg_end), opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
+    // if reg_ptr > reg_end, the top bit of (reg_ptr-reg_end) will be 0
+    MINSERT(bb, where, XINST_CREATE_slr_s(drcontext, opnd_create_reg(reg_end), reg_is_32bit(reg_end) ? OPND_CREATE_INT(31) : OPND_CREATE_INT(63)));
+    MINSERT(bb, where, XINST_CREATE_store(drcontext, opnd_sample, opnd_create_reg(reg_end)));
+#else
+    instr_t* skip_to_count = INSTR_CREATE_label(drcontext);
+    instr_t* skip_to_count_le = INSTR_CREATE_label(drcontext);
+    MINSERT(bb, where, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(window_enable)));
+    MINSERT(bb, where, XINST_CREATE_jump_cond(drcontext, DR_PRED_LE, opnd_create_instr(skip_to_count_le)));
+    // reg_ptr > window_enable // 0
+    // TODO: now we are debuging with all sampled case. FIXME.
+    MINSERT(bb, where, XINST_CREATE_load_int(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(0)));
+    MINSERT(bb, where, XINST_CREATE_jump(drcontext, opnd_create_instr(skip_to_count)));
+    // reg_ptr <= window_enable // 1
+    MINSERT(bb, where, skip_to_count_le);
+    MINSERT(bb, where, XINST_CREATE_load_int(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(1)));
+    MINSERT(bb, where, skip_to_count);
+    MINSERT(bb, where, XINST_CREATE_store(drcontext, opnd_sample, opnd_create_reg(reg_ptr)));
+#ifdef VTRACER_DEBUG_DETAIL
+    dr_insert_clean_call(drcontext, bb, where,
+                             (void *)debug_print_sample_state, false, 2,
+                             opnd_create_reg(reg_ptr), opnd_sample);
+#endif
+    // reload counter
+    dr_insert_read_raw_tls(drcontext, bb, where, tls_seg, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR, reg_ptr);
+#endif
+    /* (3) ADD COUNTER WITH NUM_COUNT VALUE */
+#ifdef AARCH64
+    // for aarch64, larger num_count (>4K) will result in more instrumentation to track
+    if(num_count >= (1<<12)/*max immediate value for add is 12-bit integer*/) {
+        minstr_load_wint_to_reg(drcontext, bb, where, reg_end, num_count);
+        MINSERT(bb, where,
+            XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
+    } else
+#endif
+    // increament the counter with num_count
+    MINSERT(bb, where,
+            XINST_CREATE_add(drcontext, opnd_create_reg(reg_ptr),
+                                OPND_CREATE_INT16(num_count)));
+
+    /* (4) CHECK IF OVERFLOWS N_disabled */
+    instr_t* skip_to_update = INSTR_CREATE_label(drcontext);
+    instr_t* skip_to_finalize = INSTR_CREATE_label(drcontext);
+#if defined(ARM) || defined(AARCH64)
+    #ifdef AARCH64
+        minstr_load_wwint_to_reg(drcontext, bb, where, reg_end, window_disable);
+        // reg_end = reg_ptr - reg_end
+        MINSERT(bb, where, INSTR_CREATE_sub(drcontext, opnd_create_reg(reg_end), opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
+        // if reg_ptr > reg_end, the top bit of (reg_ptr-reg_end) will be 0
+        MINSERT(bb, where, INSTR_CREATE_tbnz(drcontext, opnd_create_instr(skip_to_update),
+                                /* If the top bit is still zero, skip the call. */
+                                opnd_create_reg(reg_end), OPND_CREATE_INT(63)));
+    #else
+        minstr_load_wint_to_reg(drcontext, bb, where, reg_end, window_disable);
+        MINSERT(bb, where, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)));
+        MINSERT(bb, where, XINST_CREATE_jump_cond(drcontext, DR_PRED_LE, opnd_create_instr(skip_to_update)));
+        // reg_end = reg_ptr - reg_end
+        MINSERT(bb, where, INSTR_CREATE_sub(drcontext, opnd_create_reg(reg_end), opnd_create_reg(reg_ptr), opnd_create_reg(reg_end)))
+    #endif
+        /* (4) IF OVERFLOW, STORE BACK CLEARED COUNTER (reg_end) */
+        dr_insert_write_raw_tls(drcontext, bb, where, tls_seg, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR, reg_end);
+        MINSERT(bb, where, XINST_CREATE_jump(drcontext, opnd_create_instr(skip_to_finalize)));
+#else
+    MINSERT(bb, where, XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(window_disable)));
+    MINSERT(bb, where, XINST_CREATE_jump_cond(drcontext, DR_PRED_LE, opnd_create_instr(skip_to_update)));
+    /* (5) IF OVERFLOW, CLEAR COUNTER */
+    MINSERT(bb, where, XINST_CREATE_sub(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(window_disable)));
+#endif
+    MINSERT(bb, where, skip_to_update);
+    /* (6) STORE BACK (reg_ptr) */
+    dr_insert_write_raw_tls(drcontext, bb, where, tls_seg, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR, reg_ptr);
+    MINSERT(bb, where, skip_to_finalize);
+    // restore registers if reserved
+#if defined(ARM) || defined(AARCH64)
+    UNRESERVE_REG(drcontext, bb, where, reg_end);
+#endif
+    UNRESERVE_REG(drcontext, bb, where, reg_ptr);
+#ifndef AARCH64
+    UNRESERVE_AFLAGS(drcontext, bb, where);
+#endif
+}
+
+static void
+analyse_orig_bb(void *drcontext, void *tag, instrlist_t *bb, void *user_data,
+                void **orig_analysis_data)
+{
+    /* Extract bb_pc and store it as analysis data. */
+    bb_analysis_data_t *bb_data = (bb_analysis_data_t*)dr_thread_alloc(drcontext, sizeof(bb_analysis_data_t));
+    bb_data->skip = false;
+    // quick return when there are no entries exist
+    if(!any_bufs_created) {
+        bb_data->num_count = 0;
+        *orig_analysis_data = bb_data;
+        return;
+    }
+    unsigned int i;
+    instr_t *instr;
+    int num_instructions = 0;
+    ushort* scratch = (ushort*)dr_thread_alloc(drcontext, sizeof(ushort)*clients.entries);
+    void** orig_analysis_data_list = (void**)dr_thread_alloc(drcontext, sizeof(void*)*cb_list.entries);
+    // clear the scratch for accumulation
+    for (i = 0; i < clients.entries; ++i) {
+        vtrace_buffer_t *buf = (vtrace_buffer_t*)drvector_get_entry(&clients, i);
+        if (buf != NULL && buf->full_cb!=NULL) {
+            DR_ASSERT(buf->fill_num_cb!=NULL);
+            scratch[i] = 0;
+        }
+    }
+#if defined(ARM) || defined(AARCH64)
+    bool skip = false;
+#endif
+    // estimate the future fill in slot numbers of each buffer
+    for (instr = instrlist_first(bb); instr != NULL; instr = instr_get_next(instr)) {
+        if(!instr_is_app(instr)) continue;
+#if defined(ARM) || defined(AARCH64)
+        if (!skip && (instr_is_exclusive_load(instr) || instr_is_ldstex(instr))) {
+            skip = true;
+        }
+        if (!skip) {
+#endif
+        if(instr_is_ignorable(instr)) continue;
+        num_instructions++;
+        for (i = 0; i < clients.entries; ++i) {
+            vtrace_buffer_t *buf = (vtrace_buffer_t*)drvector_get_entry(&clients, i);
+            if (buf != NULL && buf->full_cb!=NULL) {
+                scratch[i] += buf->fill_num_cb(drcontext, instr, buf->user_data_fill_num);
+            }
+        }
+#if defined(ARM) || defined(AARCH64)
+        }
+        if (skip && (instr_is_exclusive_store(instr) || instr_is_ldstex(instr))) {
+            skip = false;
+        }
+#endif
+    }
+    if (sample_mode==VTRACER_BURSTY_SAMPLE_OPERAND) {
+        int num_operands = 0;
+        for(i = 0; i < clients.entries; ++i) {
+            vtrace_buffer_t *buf = (vtrace_buffer_t*)drvector_get_entry(&clients, i);
+            if (buf != NULL && buf->full_cb!=NULL) {
+                num_operands += scratch[i];
+            }
+        }
+        bb_data->num_count = num_operands;
+    } else {
+        DR_ASSERT(sample_mode==VTRACER_BURSTY_SAMPLE_INSRUCTION);
+        bb_data->num_count = num_instructions;
+    }
+    bb_data->scratch = scratch;
+#ifdef VTRACER_DEBUG_DETAIL
+    dr_fprintf(STDOUT, "== VTRACER == bb info: num_ins=%d\n", num_instructions);
+    instrlist_disassemble(drcontext, (app_pc)tag, bb, STDOUT);
+    dr_fprintf(STDOUT, "== VTRACER == fill num:\n");
+    for (i = 0; i < clients.entries; ++i) {
+        vtrace_buffer_t *buf = (vtrace_buffer_t*)drvector_get_entry(&clients, i);
+        if (buf != NULL && buf->full_cb!=NULL) {
+            dr_fprintf(STDOUT, "\t[%d] %d\n", i, scratch[i]);
+        }
+    }
+    dr_fprintf(STDOUT, "==========\n");
+#endif
+    // TODO: need to register per-basic-block analysis callback
+    for(i=0; i<cb_list.entries; ++i) {
+        vtracer_sampled_cb_t* cb = (vtracer_sampled_cb_t*)drvector_get_entry(&cb_list, i);
+        if (cb->bb_analysis) {
+            cb->bb_analysis(drcontext, tag, bb, user_data, &orig_analysis_data_list[i]);
+        }
+    }
+    bb_data->orig_analysis_data_list = orig_analysis_data_list;
+    *orig_analysis_data = bb_data;
+}
+
+static void
+destroy_orig_analysis(void *drcontext, void *user_data, void *orig_analysis_data)
+{
+    /* Destroy the orig analysis data, particularly the pc of the bb. */
+    DR_ASSERT(orig_analysis_data != NULL);
+    bb_analysis_data_t *bb_data = (bb_analysis_data_t*)orig_analysis_data;
+    for(unsigned int i=0; i<cb_list.entries; ++i) {
+        vtracer_sampled_cb_t* cb = (vtracer_sampled_cb_t*)drvector_get_entry(&cb_list, i);
+        if (cb->destroy_bb_analysis) {
+            cb->destroy_bb_analysis(drcontext, user_data, bb_data->orig_analysis_data_list[i]);
+        }
+    }
+    dr_thread_free(drcontext, bb_data->orig_analysis_data_list, sizeof(void*)*cb_list.entries);
+    dr_thread_free(drcontext, bb_data->scratch, sizeof(ushort)*clients.entries);
+    dr_thread_free(drcontext, bb_data, sizeof(bb_analysis_data_t));
+}
+
+#ifdef VTRACER_DEBUG_DETAIL
+void debug_print_encoding(uintptr_t encoding, uint64_t num_count, int has_trace) {
+    void* drcontext = dr_get_current_drcontext();
+    ins_per_thread_t *pt = (ins_per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    uint64_t val = reinterpret_cast<uint64_t>(BUF_PTR(pt->numInsBuff, tls_offs + INSTRACE_TLS_OFFS_BUF_PTR));
+    uint64_t sample_state = reinterpret_cast<uint64_t>(BUF_PTR(pt->numInsBuff, tls_offs + sizeof(void *) * INSTRACE_TLS_OFFS_SAMPLE_STATE));
+    int tid = dr_get_thread_id(drcontext);
+    dr_fprintf(STDOUT, "tid=%d, tls::num_counts=%ld, <enable,disable>=<%d,%d>, add::num_count=%ld, sample_state=%ld, encoding=%ld, has_trace=%d\n", tid, val, window_enable, window_disable, num_count, sample_state, encoding, has_trace);
+    DR_ASSERT(sample_state<2);
+}
+
+static void instrument_instr_debug(void *drcontext, void *tag, instrlist_t *bb, instr_t *instr,
+                 instr_t *where, uintptr_t encoding, void *user_data,
+                 void *orig_analysis_data, void *analysis_data)
+{
+    bool is_start;
+    bb_analysis_data_t *bb_data = (bb_analysis_data_t*)orig_analysis_data;
+    int has_trace = 0;
+    for (unsigned int i=0; i<clients.entries; ++i) {
+        if(bb_data->scratch[i]) {
+            has_trace = 1;
+            break;
+        }
+    }
+    /* Determine whether the instr is the first instruction in the
+     * currently considered basic block copy.
+     */
+    drbbdup_is_first_instr(drcontext, instr, &is_start);
+    if (is_start) {
+        dr_insert_clean_call(drcontext, bb, where, (void*)debug_print_encoding, false, 3, OPND_CREATE_INTPTR(encoding), OPND_CREATE_INT64(bb_data->num_count), OPND_CREATE_INT32(has_trace));
+    }
+    return ;
+}
+#endif
+
+static void
+instrument_instr(void *drcontext, void *tag, instrlist_t *bb, instr_t *instr,
+                 instr_t *where, uintptr_t encoding, void *user_data,
+                 void *orig_analysis_data, void *analysis_data)
+{
+#ifdef VTRACER_DEBUG_DETAIL
+    instrument_instr_debug(drcontext, tag, bb, instr, where, encoding, user_data, orig_analysis_data, analysis_data);
+#endif
+    unsigned int i;
+    bool is_start;
+    bb_analysis_data_t *bb_data = (bb_analysis_data_t*)orig_analysis_data;
+    /* Determine whether the instr is the first instruction in the
+     * currently considered basic block copy.
+     */
+    drbbdup_is_first_instr(drcontext, instr, &is_start);
+    if (is_start) {
+        /* Check if hot case. */
+        if (encoding == 1) {
+            insert_buf_check(drcontext, bb, where, bb_data->scratch);
+            for(i=0; i<cb_list.entries; ++i) {
+                vtracer_sampled_cb_t* cb = (vtracer_sampled_cb_t*)drvector_get_entry(&cb_list, i);
+                if (cb->instrument_bb_entry_sampled) {
+                    cb->instrument_bb_entry_sampled(drcontext, bb, where, bb_data->orig_analysis_data_list[i]);
+                }
+            }
+        } else {
+            for(i=0; i<cb_list.entries; ++i) {
+                vtracer_sampled_cb_t* cb = (vtracer_sampled_cb_t*)drvector_get_entry(&cb_list, i);
+                if (cb->instrument_bb_entry_original) {
+                    cb->instrument_bb_entry_original(drcontext, bb, where, bb_data->orig_analysis_data_list[i]);
+                }
+            }
+        }
+    }
+    /* Check if sampled. */
+    if (encoding == 1) {
+#if defined(ARM) || defined(AARCH64)
+        if (!bb_data->skip && (instr_is_exclusive_load(instr) || instr_is_ldstex(instr))) {
+            bb_data->skip = true;
+        }
+        if (!bb_data->skip) {
+#endif
+        for(i=0; i<cb_list.entries; ++i) {
+            vtracer_sampled_cb_t* cb = (vtracer_sampled_cb_t*)drvector_get_entry(&cb_list, i);
+            if(cb->instrument_instr) {
+                cb->instrument_instr(drcontext, tag, bb, instr, where, user_data, bb_data->orig_analysis_data_list[i]);
+            }
+        }
+#if defined(ARM) || defined(AARCH64)
+        }
+        if (bb_data->skip && (instr_is_exclusive_store(instr) || instr_is_ldstex(instr))) {
+            bb_data->skip = false;
+        }
+#endif
+    }
+    return ;
+}
+
 static per_thread_t *
 per_thread_init(void *drcontext, vtrace_buffer_t *buf)
 {
@@ -526,7 +886,7 @@ per_thread_init(void *drcontext, vtrace_buffer_t *buf)
 }
 
 bool
-vtracer_init(void)
+vtracer_init_ex(vtracer_options_t* opts)
 {
 
     if (!drmgr_init()) {
@@ -541,6 +901,57 @@ vtracer_init(void)
         DR_ASSERT_MSG(false, "ERROR: vtracer unable to initialize drutil");
     }
 
+    sample_mode = opts->mode;
+    if (sample_mode!=VTRACER_NO_SAMPLE) {
+        /* Initialise drbbdup. Essentially, drbbdup requires
+        * the client to pass a set of call-back functions and
+        * the memory operand that the dispatcher will use
+        * to load the current runtime case encoding.
+        */
+        window_enable = opts->win_enable;
+        window_disable = opts->win_disable;
+        // only register restricted tls resources when needed
+        tls_idx = drmgr_register_tls_field();
+        DR_ASSERT_MSG(tls_idx!=-1, "vtracer_enable_sampling: drmgr_register_tls_field failed!\n");
+        if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, INSTRACE_TLS_COUNT, 0))
+            DR_ASSERT_MSG(false, "vtracer_enable_sampling: dr_raw_tls_calloc failed!\n");
+        drbbdup_options_t drbbdup_ops = { 0 };
+        drbbdup_ops.struct_size = sizeof(drbbdup_options_t);
+        if (sample_mode==VTRACER_SAMPLE_EX) {
+            DR_ASSERT_MSG(false, "[FUTURE] VTRACER_SAMPLE_EX not tested. DO NOT USE.\n");
+            drbbdup_ops.set_up_bb_dups = opts->set_up_bb_dups;
+            drbbdup_ops.insert_encode =  opts->insert_encode;
+            drbbdup_ops.analyze_orig = opts->analyse_orig_bb;
+            drbbdup_ops.destroy_orig_analysis = opts->destroy_orig_analysis;
+            /* The operand referring to memory storing the current runtime case encoding. */
+            drbbdup_ops.runtime_case_opnd = opts->sample_memory_opnd;
+        } else {
+            drbbdup_ops.set_up_bb_dups = set_up_bb_dups;
+            drbbdup_ops.insert_encode = insert_encode;
+            drbbdup_ops.analyze_orig = analyse_orig_bb;
+            drbbdup_ops.destroy_orig_analysis = destroy_orig_analysis;
+            /* The operand referring to memory storing the current runtime case encoding. */
+            drbbdup_ops.runtime_case_opnd = 
+                dr_raw_tls_opnd(dr_get_current_drcontext(), tls_seg, tls_offs+sizeof(void *) * INSTRACE_TLS_OFFS_SAMPLE_STATE);
+        }
+        opnd_sample = drbbdup_ops.runtime_case_opnd;
+        drbbdup_ops.instrument_instr = instrument_instr;
+        drbbdup_ops.non_default_case_limit = 1; /* Only one additional copy is needed. */
+        drbbdup_ops.is_stat_enabled = false;
+        
+        if (drbbdup_init(&drbbdup_ops) != DRBBDUP_SUCCESS)
+            DR_ASSERT_MSG(false, "drbbdup initialize failed!\n");
+        if (!drvector_init(&cb_list, 1, false /*!synch*/, NULL)) {
+            return false;
+        }
+    } else {
+        // require full trace without sampling
+        tls_idx = -1;
+        if(!drmgr_register_bb_instrumentation_event(event_basic_block, NULL, NULL)) {
+            return false;
+        }
+    }
+
     drmgr_priority_t exit_priority = { sizeof(exit_priority),
                                        DRMGR_PRIORITY_NAME_TRACE_BUF_EXIT, NULL, NULL,
                                        DRMGR_PRIORITY_THREAD_EXIT_TRACE_BUF };
@@ -550,12 +961,17 @@ vtracer_init(void)
 
     if (!drvector_init(&clients, 1, false /*!synch*/, NULL) ||
         !drmgr_register_thread_init_event_ex(event_thread_init, &init_priority) ||
-        !drmgr_register_thread_exit_event_ex(event_thread_exit, &exit_priority) ||
-        !drmgr_register_bb_instrumentation_event(event_basic_block, NULL, NULL)
+        !drmgr_register_thread_exit_event_ex(event_thread_exit, &exit_priority)
         )
         return false;
-    tls_idx = -1;
     return true;
+}
+
+bool vtracer_init(void)
+{
+    vtracer_options_t vtracer_opts;
+    vtracer_opts.mode = VTRACER_NO_SAMPLE;
+    return vtracer_init_ex(&vtracer_opts);
 }
 
 void
@@ -563,10 +979,17 @@ vtracer_exit(void)
 {
     drmgr_unregister_thread_init_event(event_thread_init);
     drmgr_unregister_thread_exit_event(event_thread_exit);
-    drmgr_unregister_bb_instrumentation_event(event_basic_block);
     if(tls_idx!=-1) {
+        for(unsigned int i=0; i<cb_list.entries; ++i) {
+            vtracer_sampled_cb_t* cb = (vtracer_sampled_cb_t*)drvector_get_entry(&cb_list, i);
+            dr_global_free(cb, sizeof(vtracer_sampled_cb_t));
+        }
+        drvector_delete(&cb_list);
         drmgr_unregister_tls_field(tls_idx);
         dr_raw_tls_cfree(tls_offs, INSTRACE_TLS_COUNT);
+        drbbdup_exit();
+    } else {
+        drmgr_unregister_bb_instrumentation_event(event_basic_block);
     }
     drvector_delete(&clients);
 
@@ -620,6 +1043,9 @@ vtracer_get_buf_base(void *drcontext, vtrace_buffer_t *buf)
 #ifdef VTRACER_DEBUG
 void debug_check_foward_num(vtrace_buffer_t *vtrace_buffer, int size) {
     per_thread_t *data = (per_thread_t*)drmgr_get_tls_field(dr_get_current_drcontext(), vtrace_buffer->tls_idx);
+#ifdef VTRACER_DEBUG_DETAIL
+    dr_fprintf(STDOUT, "forward: [%p] data->scratch=%d, size=%d\n", data, data->scratch, size);
+#endif
     data->scratch -= size;
     DR_ASSERT_MSG(data->scratch >= 0, "Usage Error: Estimated Fill number too small!");
 }
@@ -790,6 +1216,7 @@ vtrace_buf_insert_buf_store(void *drcontext, instrlist_t *ilist,
     VTRACER_LOG(SUMMARY, "enter vtrace_buf_insert_buf_store\n");
     switch (opsz) {
 #if defined(AARCH64)
+    case OPSZ_1b:
     // case OPSZ_2b for optional shift(lsl lsr...) in arm, treat it as 1 bytes e.g. add    %sp $0x0000 **lsl** $0x00 -> %x0
     case OPSZ_2b:
     // case OPSZ_3b for SUBS (extended register) imm3 in arm, treat it as 1 bytes e.g. subs   %x1 %x2 lsl **$0x00** -> %xzr
@@ -824,10 +1251,10 @@ vtrace_buf_insert_buf_store(void *drcontext, instrlist_t *ilist,
     VTRACER_LOG(SUMMARY, "exit vtrace_buf_insert_buf_store\n");
 }
 
-#ifdef VTRACER_DEBUG_DETAIL
+#ifdef VTRACER_DEBUG
 void debug_print(void* src, int offset) {
-    dr_fprintf(STDOUT, "DETAIL: src=%lx, offset=%d, mem=%p\n", src, offset, (uint8_t*)src+offset);
-    dr_fprintf(STDOUT, "DETAIL:          memval=%d\n", *((uint8_t*)((uint8_t*)src+offset)));
+    dr_fprintf(STDOUT, "src=%lx, offset=%d, mem=%p\n", src, offset, (uint8_t*)src+offset);
+    dr_fprintf(STDOUT, "         memval=%d\n", *((uint8_t*)((uint8_t*)src+offset)));
 }
 #endif
 
@@ -865,21 +1292,6 @@ void insert_load(void *drcontext, instrlist_t *ilist, instr_t *where, reg_id_t d
     VTRACER_LOG(SUMMARY, "exit insert_load\n");
 }
 
-#ifdef VTRACER_DEBUG
-void debug_print_2(uint64_t addr, char* buf) {
-    dr_fprintf(STDERR, "mem addr=%lx, instr: %s\n", addr, buf);
-    fflush(stderr);
-}
-void debug_print_opnd(char* buf) {
-    dr_fprintf(STDERR, "Tracing OPND=%s\n", buf);
-    fflush(stderr);
-}
-void debug_print_pass() {
-    dr_fprintf(STDERR, "Passed\n");
-    fflush(stderr);
-}
-#endif
-
 template <int size>
 inline __attribute__((always_inline)) void
 insert_trace_value_in_mem(void *drcontext, instrlist_t *ilist, instr_t *where,
@@ -888,15 +1300,7 @@ insert_trace_value_in_mem(void *drcontext, instrlist_t *ilist, instr_t *where,
   switch (size) {
   case 1: {
     reg_id_t reg_val = reg_resize_to_opsz(reg_addr, OPSZ_1);
-#ifdef VTRACER_DEBUG
-    char* buf = new char[50];
-    instr_disassemble_to_buffer(drcontext, where, buf, 50);
-    dr_insert_clean_call(drcontext, ilist, where, (void*)debug_print_2, false, 2, opnd_create_reg(reg_addr), OPND_CREATE_INTPTR(buf));
-#endif
     insert_load(drcontext, ilist, where, reg_val, reg_addr, 0, OPSZ_1);
-#ifdef VTRACER_DEBUG
-    dr_insert_clean_call(drcontext, ilist, where, (void*)debug_print_pass, false, 0);
-#endif
     vtrace_buf_insert_buf_store(drcontext, ilist, where, reg_ptr,
                                DR_REG_NULL, opnd_create_reg(reg_val), OPSZ_1,
                                offset);
@@ -1017,21 +1421,87 @@ insert_trace_value_in_mem(void *drcontext, instrlist_t *ilist, instr_t *where,
   VTRACER_LOG(SUMMARY, "exit insert_trace_value_in_mem: size=%d\n", size);
 }
 
+#ifdef VTRACER_DEBUG_DETAIL
+template<typename T>
+void debug_print_trace_val(instr_t* ins_clone, T* memval) {
+    dr_fprintf(STDOUT, "[debug] instr: pc=%p\n\t##INSTR: ", instr_get_app_pc(ins_clone));
+    instr_disassemble(dr_get_current_drcontext(), ins_clone, STDOUT);
+    dr_fprintf(STDOUT, "\n[debug] memptr=%p, size=%d, val = \n\t", memval, sizeof(T));
+    switch (sizeof(T)) {
+        case 1:
+        case 2:
+        case 4:
+        case 8:
+            dr_fprintf(STDOUT, "%lx\n", (uint64_t)memval[0]);
+            break;
+        case 64:
+            dr_fprintf(STDOUT, "%lx, %lx, %lx, %lx", (uint64_t)memval[7], (uint64_t)memval[6], (uint64_t)memval[5], (uint64_t)memval[4]);
+        case 32:
+            dr_fprintf(STDOUT, "%lx, %lx, ", (uint64_t)memval[3], (uint64_t)memval[2]);
+        case 16:
+            dr_fprintf(STDOUT, "%lx, %lx\n", (uint64_t)memval[1], (uint64_t)memval[0]);
+            break;
+        default:
+            DR_ASSERT_MSG(false, "Unknown size\n");
+    }
+}
+
+void debug_print_hhh() {
+    dr_fprintf(STDOUT, "===========\n");
+}
+
+void debug_print_reg_id(reg_id_t reg, uint64_t val) {
+    dr_fprintf(STDOUT, "%d: %s, val=%lx\n", reg, get_register_name(reg), val);
+}
+#endif
+
+void insert_restore_for_opnd(void* drcontext, instrlist_t* ilist, instr_t* where, opnd_t opnd) {
+    // FIXME: used registers (e.g., XAX) may be lazy restored and remain as reserved. Maybe there is better way to handle this.
+    drreg_reserve_info_t info = { sizeof(drreg_reserve_info_t) };
+    int reg_num = opnd_num_regs_used(opnd);
+    for(int k = 0; k < reg_num; k++) {
+        reg_id_t reg = opnd_get_reg_used(opnd, k);
+        // only GPR will be reserved by drreg
+        if(reg_is_gpr(reg)) {
+            drreg_reservation_info_ex(drcontext, reg, &info);
+            if(!info.holds_app_value && info.app_value_retained) {
+                reg = reg_to_pointer_sized(reg);
+                drreg_status_t status = drreg_get_app_value(drcontext, ilist, where, reg, reg);
+                if (status != DRREG_SUCCESS) {
+                    dr_fprintf(STDOUT, "opnd: ");
+                    opnd_disassemble(drcontext, opnd, STDOUT);
+                    dr_fprintf(STDOUT, ", register: %s, status=%d\n", get_register_name(reg), status);
+                    dr_fprintf(STDOUT, "reservation info: size=%d, reserved=%d, holds_app_value=%d, app_value_retained=%d, is_dr_slot=%d, tls_offs=%d\n",
+                        info.size, info.reserved, info.holds_app_value, info.app_value_retained, info.is_dr_slot, info.tls_offs);
+                    dr_fprintf(STDOUT, "size=%d, ptr_sized=%d, reg=%d, GPR_START=%d, GPR_END=%d, is_gpr=%d\n", opnd_size_in_bytes(reg_get_size(reg)), reg_is_pointer_sized(reg), reg, DR_REG_START_GPR, DR_REG_STOP_GPR, reg_is_gpr(reg));
+                    DR_ASSERT_MSG(0,
+                            "insert_trace_for_mem: register is overlapped with register used in the target memory operand but it fails to restore the app value!");
+                }
+            }
+        }
+    }
+}
+
 /* Trace Memory Operands */
-template <int sz>
+template <int sz,bool opnd_is_app>
 void insert_trace_for_mem(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t mem_opnd, ushort offset, 
                           reg_id_t reg_ptr, reg_id_t scratch) {
   VTRACER_LOG(SUMMARY, "enter insert_trace_for_mem: size=%d\n", sz);
   reg_id_t free_reg;
+  
   // check if reg is dirty
   if (opnd_uses_reg(mem_opnd, reg_ptr)) {
         DR_ASSERT_MSG(0,
                 "insert_trace_for_mem: reg_ptr should not overlap with register used in the target memory operand!");
   }
 
-  if (opnd_uses_reg(mem_opnd, scratch) && drreg_get_app_value(drcontext, ilist, where, scratch, scratch) != DRREG_SUCCESS) {
+  if (opnd_uses_reg(mem_opnd, scratch)) {
         DR_ASSERT_MSG(0,
-                "insert_trace_for_mem: scratch register is overlapped with register used in the target memory operand but it fails to restore the app value!");
+                "insert_trace_for_mem: scratch should not overlap with register used in the target memory operand!");
+  }
+
+  if(opnd_is_app) {
+    insert_restore_for_opnd(drcontext, ilist, where, mem_opnd);
   }
 
   drvector_t allowed;
@@ -1045,10 +1515,20 @@ void insert_trace_for_mem(void *drcontext, instrlist_t *ilist, instr_t *where, o
     DR_ASSERT_MSG(0,
                 "insert_trace_for_mem drutil_insert_get_mem_addr failed!");
   }
-#ifdef VTRACER_DEBUG
-    char* buf = new char[50];
-    opnd_disassemble_to_buffer(drcontext, mem_opnd, buf, 50);
-    dr_insert_clean_call(drcontext, ilist, where, (void*)debug_print_opnd, false, 1, OPND_CREATE_INTPTR(buf));
+#ifdef VTRACER_DEBUG_DETAIL
+  switch(sz) {
+    case 1:
+        dr_insert_clean_call(drcontext, ilist, where, (void*)debug_print_trace_val<uint8_t>, false, 2, OPND_CREATE_INTPTR(instr_clone(drcontext, where)), opnd_create_reg(free_reg));
+        break;
+    case 2:
+        dr_insert_clean_call(drcontext, ilist, where, (void*)debug_print_trace_val<uint16_t>, false, 2, OPND_CREATE_INTPTR(instr_clone(drcontext, where)), opnd_create_reg(free_reg));
+        break;
+    case 4:
+        dr_insert_clean_call(drcontext, ilist, where, (void*)debug_print_trace_val<uint32_t>, false, 2, OPND_CREATE_INTPTR(instr_clone(drcontext, where)), opnd_create_reg(free_reg));
+        break;
+    default:
+        dr_insert_clean_call(drcontext, ilist, where, (void*)debug_print_trace_val<uint64_t>, false, 2, OPND_CREATE_INTPTR(instr_clone(drcontext, where)), opnd_create_reg(free_reg));
+  }
 #endif
   // insert loads from the given memory and store into the buffered trace
   insert_trace_value_in_mem<sz>(drcontext, ilist, where, offset, 
@@ -1205,7 +1685,7 @@ void insert_trace_value_in_simd(void *drcontext, instrlist_t *ilist, instr_t *wh
     VTRACER_LOG(SUMMARY, "exit insert_trace_value_in_simd: size=%d\n", size);
 }
 
-template <int sz>
+template <int sz,bool opnd_is_app>
 /* Trace General Purpose Register Operands */
 void insert_trace_for_gpr(void *drcontext, instrlist_t *ilist, instr_t *where,
                           opnd_t gpr_opnd, ushort offset, reg_id_t reg_ptr, reg_id_t scratch) {
@@ -1229,10 +1709,8 @@ void insert_trace_for_gpr(void *drcontext, instrlist_t *ilist, instr_t *where,
                 "insert_trace_for_gpr opnd cannot use reg_ptr!");
   }
 
-  if (reg_used == reg_resize_to_opsz(scratch, opsz) && drreg_get_app_value(drcontext, ilist, where, scratch, scratch) != DRREG_SUCCESS) {
-	dr_fprintf(STDOUT, "scratch = %d, reg_used = %d\n", reg_resize_to_opsz(scratch, opsz), reg_used);
-        DR_ASSERT_MSG(0,
-                "insert_trace_for_gpr drreg_get_app_value scratch failed!");
+  if (opnd_is_app) {
+    insert_restore_for_opnd(drcontext, ilist, where, gpr_opnd);
   }
 
   // copy the value in reg_used to reg_val;
@@ -1270,7 +1748,51 @@ void insert_trace_for_x87(void *drcontext, instrlist_t *ilist, instr_t *where,
 #endif
 }
 
-void vtracer_insert_trace_val(void *drcontext, instr_t *where,
+void vtracer_insert_trace_addr(void *drcontext, instr_t *where,
+                              instrlist_t *ilist, opnd_t mem_opnd, reg_id_t reg_ptr, reg_id_t reg_addr,
+                              reg_id_t scratch, ushort offset)
+{
+    VTRACER_LOG(SUMMARY, "enter vtracer_insert_trace_addr\n");
+    DR_ASSERT_MSG(opnd_is_memory_reference(mem_opnd), "vtracer_insert_trace_addr needs memory operands!");
+    // check if reg is dirty
+    if (opnd_uses_reg(mem_opnd, reg_ptr)) {
+            DR_ASSERT_MSG(0,
+                    "insert_trace_for_mem: reg_ptr should not overlap with register used in the target memory operand!");
+    }
+
+    if (opnd_uses_reg(mem_opnd, scratch)) {
+            DR_ASSERT_MSG(0,
+                    "insert_trace_for_mem: scratch should not overlap with register used in the target memory operand!");
+    }
+
+    if (opnd_uses_reg(mem_opnd, reg_addr)) {
+        DR_ASSERT_MSG(0,
+                    "insert_trace_for_mem: reg_addr should not overlap with register used in the target memory operand!");
+    }
+
+    insert_restore_for_opnd(drcontext, ilist, where, mem_opnd);
+
+    // calculate the memory address
+    if (!drutil_insert_get_mem_addr(drcontext, ilist, where, mem_opnd,
+                                    reg_addr /*addr*/, scratch /*scratch*/)) {
+        DR_ASSERT_MSG(0,
+                    "insert_trace_for_mem drutil_insert_get_mem_addr failed!");
+    }
+    switch(opnd_size_in_bytes(reg_get_size(reg_addr))) {
+        case 4:
+            insert_trace_for_gpr<8,false/*not app value*/>(drcontext, ilist, where, opnd_create_reg(reg_addr), offset, reg_ptr, scratch);
+            break;
+        case 8:
+            insert_trace_for_gpr<8,false/*not app value*/>(drcontext, ilist, where, opnd_create_reg(reg_addr), offset, reg_ptr, scratch);
+            break;
+        default:
+            assert(false && "Unknown register size!");
+    }
+    VTRACER_LOG(SUMMARY, "exit vtracer_insert_trace_addr: successfully\n");
+}
+
+template<bool opnd_is_app>
+void vtracer_insert_trace_val_impl(void *drcontext, instr_t *where,
                               instrlist_t *ilist, opnd_t ref, reg_id_t reg_ptr,
                               reg_id_t scratch, ushort offset)
 {
@@ -1290,25 +1812,25 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
     if(opnd_is_memory_reference(ref)) {
         switch(size) {
             case 1:
-                insert_trace_for_mem<1>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
+                insert_trace_for_mem<1,opnd_is_app>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
                 break;
             case 2:
-                insert_trace_for_mem<2>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
+                insert_trace_for_mem<2,opnd_is_app>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
                 break;
             case 4:
-                insert_trace_for_mem<4>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
+                insert_trace_for_mem<4,opnd_is_app>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
                 break;
             case 8:
-                insert_trace_for_mem<8>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
+                insert_trace_for_mem<8,opnd_is_app>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
                 break;
             case 16:
-                insert_trace_for_mem<16>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
+                insert_trace_for_mem<16,opnd_is_app>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
                 break;
             case 32:
-                insert_trace_for_mem<32>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
+                insert_trace_for_mem<32,opnd_is_app>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
                 break;
             case 64:
-                insert_trace_for_mem<64>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
+                insert_trace_for_mem<64,opnd_is_app>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
                 break;
             default:
                 assert(false && "Unknown memory operand size!");
@@ -1316,7 +1838,7 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
     } else if(opnd_is_reg(ref)) {
         reg_id_t reg = opnd_get_reg(ref);
 #ifdef AARCH64
-        if(reg == DR_REG_TPIDRURW || reg == DR_REG_TPIDRURO) {
+        if(reg == DR_REG_TPIDRURW || reg == DR_REG_TPIDRURO || reg == DR_REG_DCZID_EL0) {
             VTRACER_LOG(SUMMARY, "exit vtracer_insert_trace_val: reg==DR_REG_TPIDRURW || reg==DR_REG_TPIDRURO\n");
             return;
         }
@@ -1328,16 +1850,16 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
         ) {
             switch(size) {
                 case 1:
-                    insert_trace_for_gpr<1>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
+                    insert_trace_for_gpr<1,opnd_is_app>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
                     break;
                 case 2:
-                    insert_trace_for_gpr<2>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
+                    insert_trace_for_gpr<2,opnd_is_app>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
                     break;
                 case 4:
-                    insert_trace_for_gpr<4>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
+                    insert_trace_for_gpr<4,opnd_is_app>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
                     break;
                 case 8:
-                    insert_trace_for_gpr<8>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
+                    insert_trace_for_gpr<8,opnd_is_app>(drcontext, ilist, where, ref, offset, reg_ptr, scratch);
                     break;
                 default:
                     assert(false && "Unknown GPR operand size!");
@@ -1391,6 +1913,29 @@ void vtracer_insert_trace_val(void *drcontext, instr_t *where,
     VTRACER_LOG(SUMMARY, "exit vtracer_insert_trace_val: successfully\n");
 }
 
+void vtracer_insert_trace_val(void *drcontext, instr_t *where,
+                              instrlist_t *ilist, opnd_t ref, reg_id_t reg_ptr,
+                              reg_id_t scratch, ushort offset) {
+    vtracer_insert_trace_val_impl<true>(drcontext, where, ilist, ref, reg_ptr, scratch, offset);
+}
+
+void vtracer_insert_trace_val_native(void *drcontext, instr_t *where,
+                              instrlist_t *ilist, opnd_t ref, reg_id_t reg_ptr,
+                              reg_id_t scratch, ushort offset) {
+    vtracer_insert_trace_val_impl<false>(drcontext, where, ilist, ref, reg_ptr, scratch, offset);
+}
+
+#if defined(ARM) || defined(AARCH64)
+bool
+instr_is_ldstex(instr_t *instr)
+{
+    if (instr_get_opcode(instr) == OP_ldstex) {
+        return true;
+    }
+    return false;
+}
+#endif
+
 bool instr_is_ignorable(instr_t *ins) {
     int opc = instr_get_opcode(ins);
 #ifdef AARCH64
@@ -1398,37 +1943,16 @@ bool instr_is_ignorable(instr_t *ins) {
         return true;
     }
 #endif
-#ifdef X86
-    if(instr_is_xsave(ins)) {
-        return true;
-    }
-#endif
-    if(instr_is_rep_string_op(ins)) {
-        return true;
-    }
     switch (opc) {
         case OP_nop:
 #ifdef X86
 	    case OP_nop_modrm:
-        case OP_fxsave32:
-        case OP_fxsave64:
-        case OP_fxrstor32:
-        case OP_fxrstor64:
-        case OP_fldenv:
-        case OP_fnstenv:
-        case OP_fnsave:
-        case OP_fldcw:
-        case OP_fnstcw:
-        case OP_xrstor32:
-        case OP_xrstor64:
-
 #endif
 
 #if defined(AARCH64)
         case OP_isb:
         case OP_ld3:
         case OP_ld3r:
-
 #endif
                 return true;
         default:

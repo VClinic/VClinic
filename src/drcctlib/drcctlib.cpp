@@ -1054,6 +1054,68 @@ minstr_load_wwint_to_reg(void *drcontext, instrlist_t *ilist, instr_t *where,
 #    endif
 
 static inline void
+instrument_before_every_bb_first_sampled(void *drcontext, instr_instrument_msg_t *instrument_msg,
+                                 bb_instrument_msg_t *bb_msg)
+{
+    instrlist_t *ilist = instrument_msg->bb;
+    instr_t *where = instrument_msg->instr;
+
+    reg_id_t reg_1, reg_2, reg_3;
+    if (drreg_reserve_register(drcontext, ilist, where, NULL, &reg_1) != DRREG_SUCCESS ||
+        drreg_reserve_register(drcontext, ilist, where, NULL, &reg_2) != DRREG_SUCCESS ||
+        drreg_reserve_register(drcontext, ilist, where, NULL, &reg_3) != DRREG_SUCCESS) {
+        DRCCTLIB_EXIT_PROCESS(
+            "instrument_before_every_bb_first drreg_reserve_register != DRREG_SUCCESS");
+    }
+
+    dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg2,
+                           tls_offs2 + INSTRACE_TLS_OFFS_BUF_PTR, reg_1);
+#    ifdef ARM64_CCTLIB
+    // bb_cache[cur_index]->bb_shadow init
+    minstr_load_wwint_to_reg(drcontext, ilist, where, reg_2,
+                             (uint64_t)(void *)bb_msg->bb_shadow);
+    MINSERT(ilist, where,
+            XINST_CREATE_store(
+                drcontext,
+                OPND_CREATE_MEMPTR(reg_1, offsetof(bb_cache_message_t, bb_shadow)),
+                opnd_create_reg(reg_2)));
+    // cur_index++
+    MINSERT(ilist, where,
+            XINST_CREATE_load_int(drcontext, opnd_create_reg(reg_2),
+                                  OPND_CREATE_IMMEDIATE_INT(sizeof(bb_cache_message_t))));
+    MINSERT(ilist, where,
+            XINST_CREATE_add(drcontext, opnd_create_reg(reg_1), opnd_create_reg(reg_2)));
+#    else
+    // bb_cache[cur_index]->bb_shadow init
+    MINSERT(ilist, where,
+            XINST_CREATE_load_int(drcontext, opnd_create_reg(reg_2),
+                                  OPND_CREATE_SHADOWPRT(bb_msg->bb_shadow)));
+    MINSERT(ilist, where,
+            XINST_CREATE_store(
+                drcontext,
+                OPND_CREATE_MEMPTR(reg_1, offsetof(bb_cache_message_t, bb_shadow)),
+                opnd_create_reg(reg_2)));
+    // cur_index++
+    MINSERT(ilist, where,
+            XINST_CREATE_add(drcontext, opnd_create_reg(reg_1),
+                             OPND_CREATE_INT32(sizeof(bb_cache_message_t))));
+#    endif
+    dr_insert_write_raw_tls(drcontext, ilist, where, tls_seg2,
+                            tls_offs2 + INSTRACE_TLS_OFFS_BUF_PTR, reg_1);
+
+    /* Restore scratch registers */
+    if (drreg_unreserve_register(drcontext, ilist, where, reg_1) != DRREG_SUCCESS ||
+        drreg_unreserve_register(drcontext, ilist, where, reg_2) != DRREG_SUCCESS ||
+        drreg_unreserve_register(drcontext, ilist, where, reg_3) != DRREG_SUCCESS) {
+        DRCCTLIB_EXIT_PROCESS(
+            "instrument_before_every_bb_first drreg_unreserve_register != DRREG_SUCCESS");
+    }
+
+    dr_insert_clean_call(drcontext, ilist, where, (void *)per_thread_update_cct_tree,
+                         false, 0);
+}
+
+static inline void
 instrument_before_every_bb_first(void *drcontext, instr_instrument_msg_t *instrument_msg,
                                  bb_instrument_msg_t *bb_msg)
 {
@@ -1508,6 +1570,11 @@ instrument_before_bb_first_instr(bb_shadow_t *cur_bb_shadow)
 #endif
     void *drcontext = dr_get_current_drcontext();
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+#ifdef CCTLIB_64
+    if ((global_flags & DRCCTLIB_CACHE_MODE) != 0) {
+        refresh_per_thread_cct_tree(drcontext, pt);
+    }
+#endif
 #ifdef DRCCTLIB_DEBUG_LOG_CCT_INFO
     pt->cct_info.cct_create_clean_call_num++;
 #endif
@@ -2789,7 +2856,15 @@ drcctlib_internal_init(char flag)
         DRCCTLIB_PRINTF("Only 64-bit support DRCCTLIB_CACHE_MEMEORY_ACCESS_ADDR");
         global_flags -= DRCCTLIB_CACHE_MEMEORY_ACCESS_ADDR;
     }
+    if ((global_flags & DRCCTLIB_SAMPLE_EX_MODE) != 0) {
+        DRCCTLIB_EXIT_PROCESS("Only 64-bit support DRCCTLIB_SAMPLE_EX_MODE.");
+    }
 #endif
+    if ((global_flags & DRCCTLIB_SAMPLE_EX_MODE) != 0) {
+        DR_ASSERT_MSG((global_flags & DRCCTLIB_CACHE_MEMEORY_ACCESS_ADDR)==0, 
+            "DRCCTLIB_CACHE_MEMEORY_ACCESS_ADDR cannot be configured when DRCCTLIB_SAMPLE_EX_MODE is enabled.");
+        global_flags |= DRCCTLIB_CACHE_MODE;
+    }
     if (!drmgr_init()) {
         DRCCTLIB_PRINTF("WARNING: drcctlib unable to initialize drmgr");
         return false;
@@ -2820,10 +2895,13 @@ drcctlib_internal_init(char flag)
         DRCCTLIB_PRINTF("WARNING: drcctlib fail to register bb app2app event");
         return false;
     }
-    if (!drmgr_register_bb_instrumentation_event(drcctlib_event_bb_analysis,
-                                                 drcctlib_event_bb_insert, NULL)) {
-        DRCCTLIB_PRINTF("WARNING: drcctlib fail to register bb instrumentation event");
-        return false;
+    // when sample mode is enabled, client should manually register the analysis and instrumentation callbacks with drbbdup.
+    if ((global_flags & DRCCTLIB_SAMPLE_EX_MODE) == 0) {
+        if (!drmgr_register_bb_instrumentation_event(drcctlib_event_bb_analysis,
+                                                    drcctlib_event_bb_insert, NULL)) {
+            DRCCTLIB_PRINTF("WARNING: drcctlib fail to register bb instrumentation event");
+            return false;
+        }
     }
     if ((global_flags & DRCCTLIB_COLLECT_DATA_CENTRIC_MESSAGE) != 0) {
         if (elf_version(EV_CURRENT) == EV_NONE) {
@@ -2914,8 +2992,12 @@ drcctlib_exit(void)
         DRCCTLIB_PRINTF("WARNING: drcctlib dr_raw_tls_cfree4 fail");
     }
     print_stats();
+    if ((global_flags & DRCCTLIB_SAMPLE_EX_MODE) == 0) {
+        if(!drmgr_unregister_bb_instrumentation_event(drcctlib_event_bb_analysis)) {
+            DRCCTLIB_PRINTF("failed to unregister in drcctlib_exit");
+        }
+    }
     if (!drmgr_unregister_bb_app2app_event(drcctlib_event_bb_app2app) ||
-        !drmgr_unregister_bb_instrumentation_event(drcctlib_event_bb_analysis) ||
         // !drmgr_unregister_bb_insertion_event(drcctlib_event_bb_insert) ||
         !drmgr_unregister_kernel_xfer_event(drcctlib_event_kernel_xfer) ||
         !drmgr_unregister_signal_event(drcctlib_event_signal) ||
@@ -3557,4 +3639,191 @@ drcctlib_priv_share_get_full_calling_ip_vector(context_handle_t ctxt_hndl,
 
         cur_ctxt = bb_node_caller_ctxt_hndl(parent_bb);
     }
+}
+
+// Externally registered with drbbdup for cct dynamic caching when sampling enabled
+DR_EXPORT
+void
+drcctlib_analyse_orig_bb(void *drcontext, void *tag, instrlist_t *bb, void *user_data,
+                void **orig_analysis_data)
+{
+    IF_DRCCTLIB_DEBUG(per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(
+                          dr_get_current_drcontext(), tls_idx);)
+#ifdef ARM32_CCTLIB
+    instr_t *first_nop_instr = instrlist_first_app(bb);
+    instr_t *first_instr = instr_get_next_app(first_nop_instr);
+#else
+    instr_t *first_instr = instrlist_first_app(bb);
+#endif
+
+    slot_t interest_instr_num = 0;
+    state_t end_state = 0;
+    int32_t mem_ref_num = 0;
+    bb_init_shadow_config(bb, &interest_instr_num, &end_state, &mem_ref_num);
+    if (interest_instr_num == 0) {
+        *orig_analysis_data = NULL;
+        return ;
+    }
+
+    bool analyzed;
+    bb_key_t bb_key = 0;
+    bb_shadow_t *bb_shadow;
+    app_pc tag_pc = instr_get_app_pc(first_instr);
+    dr_mutex_lock(bb_shadow_lock);
+    void *stored_key = hashtable_lookup(&global_bb_key_table, (void *)tag_pc);
+    if (stored_key != NULL) {
+        bb_shadow = NULL;
+        bb_key = (bb_key_t)(ptr_int_t)stored_key;
+        bb_shadow = global_bb_shadow_cache->get_object_by_index(bb_key);
+        analyzed = true;
+    } else {
+        bb_shadow = global_bb_shadow_cache->get_next_object();
+        bb_shadow_init_config(bb_shadow, interest_instr_num, end_state, mem_ref_num);
+
+        bb_key = bb_shadow->key;
+        hashtable_add(&global_bb_key_table, (void *)tag_pc, (void *)(ptr_int_t)bb_key);
+        analyzed = false;
+    }
+    dr_mutex_unlock(bb_shadow_lock);
+
+    // only create cache when the bb_shadow is newly allocated
+    if (bb_shadow != NULL && !analyzed) {
+        bb_shadow_create_cache(bb_shadow);
+    }
+
+    bb_instrument_msg_t *bb_msg =
+        bb_instrument_msg_create((uint64_t)(void *)bb_shadow, interest_instr_num,
+                                 end_state, mem_ref_num, bb_shadow);
+    // quickly return the analyzed bb_msg
+    if (analyzed) {
+        DR_ASSERT_MSG(interest_instr_num==bb_shadow->slot_num, "SLOT NUM Changed!");
+        *orig_analysis_data = (void*)bb_msg;
+        return ;
+    }
+#ifdef DRCCTLIB_DEBUG
+    if (bb_shadow != NULL) {
+        dr_fprintf(pt->log_file_instr, "\n\n-%d/%d/%d/%d\n", for_trace ? 1 : 0,
+                   translating ? 1 : 0, bb_key, interest_instr_num);
+    }
+#endif
+    IF_ARM_CCTLIB(bool skip = false;)
+    bool interest_start = false;
+    slot_t slot = 0;
+    for (instr_t *instr = first_instr; instr != NULL; instr = instr_get_next_app(instr)) {
+#ifdef ARM_CCTLIB
+        if (!skip && (instr_is_exclusive_load(instr) || instr_is_ldstex(instr))) {
+            skip = true;
+        }
+        if (!skip) {
+#endif
+            state_t state_flag = instr_get_state(instr);
+            if (instr_need_instrument_check_flag(state_flag)) {
+                if (bb_shadow != NULL) {
+                    bb_shadow->ip_shadow[slot] = instr_get_app_pc(instr);
+                    bb_shadow->state_shadow[slot] = state_flag;
+                    instr_disassemble_to_buffer(drcontext, instr,
+                                                bb_shadow->disasm_shadow +
+                                                    slot * DISASM_CACHE_SIZE,
+                                                DISASM_CACHE_SIZE);
+                    IF_DRCCTLIB_DEBUG(
+                        dr_fprintf(pt->log_file_instr, "+%d/%d/[%p]%s\n", bb_key, slot, instr_get_app_pc(instr), 
+                                   bb_shadow->disasm_shadow + slot * DISASM_CACHE_SIZE);)
+                }
+                if (!interest_start &&
+                    instr_state_contain(state_flag, INSTR_STATE_CLIENT_INTEREST)) {
+                    interest_start = true;
+                }
+                slot++;
+            }
+#ifdef ARM_CCTLIB
+        }
+        if (skip && (instr_is_exclusive_store(instr) || instr_is_ldstex(instr))) {
+            skip = false;
+        }
+#endif
+    }
+    *orig_analysis_data = (void*)bb_msg;
+    return ;
+}
+
+DR_EXPORT
+void
+drcctlib_destroy_orig_analysis(void *drcontext, void *user_data, void *orig_analysis_data)
+{
+    bb_instrument_msg_t *bb_msg = (bb_instrument_msg_t*)orig_analysis_data;
+    bb_instrument_msg_delete(bb_msg);
+    return ;
+}
+
+DR_EXPORT
+int32_t
+drcctlib_query_slot(void *orig_analysis_data, instr_t* instr) {
+    if(orig_analysis_data!=NULL) {
+        app_pc tag = instr_get_app_pc(instr);
+        bb_instrument_msg_t *bb_msg = (bb_instrument_msg_t*)orig_analysis_data;
+        bb_shadow_t *bb_shadow = bb_msg->bb_shadow;
+        int32_t slot_max = bb_msg->slot_max;
+        for(int32_t i=0; i<slot_max; ++i) {
+            if(tag==bb_shadow->ip_shadow[i]) {
+                return i;
+            }
+        }
+#ifdef DEBUG
+        dr_fprintf(STDOUT, "[TID=%d] QUERY: APP_PC %p, bb_msg=%p bb_shadow=%p, ip_shadow=%p\n", dr_get_thread_id(dr_get_current_drcontext()), tag, bb_msg, bb_shadow, bb_shadow->ip_shadow);
+        dr_fprintf(STDOUT, "INSTR: [is_app=%d] ", instr_is_app(instr));
+        instr_disassemble(dr_get_current_drcontext(), instr, STDOUT);
+        dr_fprintf(STDOUT, "\n");
+        dr_fprintf(STDOUT, "APP_PC %p not found: slot_max=%d\n", tag, slot_max);
+        for(int32_t i=0; i<slot_max; ++i) {
+            dr_fprintf(STDOUT, "\t[%d] app_pc=%p, compare=%d, instr: %s\n", i, bb_shadow->ip_shadow[i], tag==bb_shadow->ip_shadow[i], bb_shadow->disasm_shadow + i * DISASM_CACHE_SIZE);
+        }
+#endif
+        // when there are exclusive load/store (ARM/AArch64), the query may result in empty slot.
+        return -1;
+        //DR_ASSERT_MSG(false, "drcctlib_query_slot: do not found slot number for app_pc!");
+    }
+    DR_ASSERT_MSG(false, "drcctlib_query_slot: empty bb_shadow!");
+    return 0;
+}
+
+DR_EXPORT
+void
+drcctlib_instr_bb_cached(void *drcontext, instrlist_t *bb, instr_t *instr, void *orig_analysis_data) {
+    if(orig_analysis_data==NULL) return;
+    bb_instrument_msg_t *bb_msg = (bb_instrument_msg_t*)orig_analysis_data;
+#ifdef CCTLIB_64
+    if ((global_flags & DRCCTLIB_CACHE_MODE) != 0) {
+        instr_instrument_msg_t *instrument_msg = instr_instrument_msg_create(bb, instr, 0/*not used*/, 0/*not used*/, 0/*not used*/);
+        instrument_before_every_bb_first(drcontext, instrument_msg, bb_msg);
+        instr_instrument_msg_delete(instrument_msg);
+    } else {
+        dr_insert_clean_call(drcontext, bb, instr,
+                                (void *)instrument_before_bb_first_instr, false, 1,
+                                OPND_CREATE_SHADOWPRT(bb_msg->bb_shadow));
+    }
+#else
+    dr_insert_clean_call(drcontext, bb, instr,
+                             (void *)instrument_before_bb_first_instr, false, 1,
+                             OPND_CREATE_SHADOWPRT(bb_msg->bb_shadow));
+#endif
+}
+
+DR_EXPORT
+void
+drcctlib_instr_bb_sampled(void *drcontext, instrlist_t *bb, instr_t *instr, void *orig_analysis_data) {
+    if(orig_analysis_data==NULL) {
+        instrlist_disassemble(drcontext, (app_pc)0, bb, STDOUT);
+    }
+    DR_ASSERT_MSG(orig_analysis_data!=NULL, "drcctlib_instr_bb_sampled failed");
+    bb_instrument_msg_t *bb_msg = (bb_instrument_msg_t*)orig_analysis_data;
+#ifdef CCTLIB_64
+    if ((global_flags & DRCCTLIB_CACHE_MODE) != 0) {
+        instr_instrument_msg_t *instrument_msg = instr_instrument_msg_create(bb, instr, 0/*not used*/, 0/*not used*/, 0/*not used*/);
+        instrument_before_every_bb_first_sampled(drcontext, instrument_msg, bb_msg);
+        instr_instrument_msg_delete(instrument_msg);
+    } else
+#endif
+    dr_insert_clean_call(drcontext, bb, instr,
+                             (void *)instrument_before_bb_first_instr, false, 1,
+                             OPND_CREATE_SHADOWPRT(bb_msg->bb_shadow));
 }

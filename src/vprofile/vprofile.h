@@ -15,7 +15,14 @@ enum {
   VPROFILE_COLLECT_DATAOBJ = 0x02,
   VPROFILE_COLLECT_DATAOBJ_TREE_BASED = 0x04,
   VPROFILE_COLLECT_DATAOBJ_ADDR_RANGE = 0x08,
+  VPROFILE_SAMPLE_BURSTY_INSTRUCTION = 0x10,
+  VPROFILE_SAMPLE_BURSTY_OPERAND = 0x20,
+  VPROFILE_SAMPLE_PERIODICAL_OPERAND = 0x40,
 };
+
+#define VPROFILE_ENABLE_CCT_COLLECTION (0x0f)
+#define VPROFILE_SAMPLE_BURSTY (0x30)
+#define VPROFILE_SAMPLE_PERIODICAL (VPROFILE_SAMPLE_PERIODICAL_OPERAND)
 
 /* TODO: Complete the data type table with all the possible cases */
 /* Enumulate all possible automatically generated trace types */
@@ -92,7 +99,7 @@ enum vprofile_src_t {
   MEMORY_BEFORE_WRITE=(REGISTER|WRITE|BEFORE)
 };
 
-#define VPROFILE_OPND_MASK_ALL ((uint32_t)0xffffffff)
+#define VPROFILE_OPND_MASK_ALL (((uint32_t)0xffffffff)-vprofile_src_t::PC)
 
 #define FILTER_OPND_MASK(filter_mask, opnd_mask) ((filter_mask & opnd_mask) == opnd_mask)
 #define TEST_OPND_MASK(target_mask, tester) FILTER_OPND_MASK(target_mask, tester)
@@ -156,6 +163,20 @@ struct val_info_t {
   bool is_float;
 };
 
+typedef struct {
+  int win_enable;
+  int win_disable;
+  bool (*filter)(instr_t *);
+  void* (*user_data_cb)(void *, instr_t *, instrlist_t *, opnd_t);
+  void (*ins_instrument_cb)(void *, instr_t *, instrlist_t *);
+  void (*bb_instrument_cb)(void *, instrlist_t *);
+  uint8_t flag;
+} vprofile_options_t;
+
+/* Initialize VProfiler. Return false when any failure detected. */
+DR_EXPORT
+bool vprofile_init_ex(vprofile_options_t *opts);
+
 /****************************************************************/
 
 /**
@@ -197,6 +218,9 @@ bool vprofile_init(bool (*filter)(instr_t *),
                    void (*ins_instrument_cb)(void *, instr_t *, instrlist_t *),
                    void (*bb_instrument_cb)(void *, instrlist_t *),
                    uint8_t flag);
+
+DR_EXPORT
+void vprofile_set_period_sampling_window(int window);
 
 /* Clear and free all the data used by VProfile */
 DR_EXPORT
