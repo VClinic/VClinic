@@ -846,7 +846,7 @@ InstrumentInstruction(void *drcontext, instrlist_t *bb, instr_t* instr, instr_t*
                         RESERVE_REG(drcontext, bb, insert_where, &allowed, reg_ptr);
                         RESERVE_REG(drcontext, bb, insert_where, &allowed, reg_scratch);
                     }
-                    instrument_opnd<with_cct>(drcontext, bb, instr, insert_where, slot, opnd, trace, reg_addr, reg_ptr, scratch, false, opmask);
+                    instrument_opnd<with_cct>(drcontext, bb, instr, insert_where, slot, opnd, trace, reg_addr, reg_ptr, scratch, reg_scratch, false, opmask);
                 }
             }
         }
@@ -2556,6 +2556,26 @@ void vprofile_update_CI_cb(void *buf_base, void *buf_end, void* user_data)
         (*((void (*)(val_info_t *)) user_data))(&user_info);
     }
 }
+
+#ifdef AARCH64
+void vprofile_update_ATP_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_ATP_t* cache_ptr = (cache_ATP_t*)buf_base;
+    cache_ATP_t* cache_end = (cache_ATP_t*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.addr = cache_ptr->addr;
+        user_info.tsc = cache_ptr->tsc;
+        user_info.pc = cache_ptr->pc;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+#endif
 
 void vprofile_update_AI_cb(void *buf_base, void *buf_end, void* user_data)
 {

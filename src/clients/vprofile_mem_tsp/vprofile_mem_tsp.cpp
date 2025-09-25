@@ -107,7 +107,7 @@ void update(val_info_t *info) {
     //dr_fprintf(gTraceFile, "  esize    : %zu\t", info->esize);
     dr_fprintf(gTraceFile, "  addr     : %p\t", info->addr);
     dr_fprintf(gTraceFile, "  app pc   : %ld\t", info->pc);
-    dr_fprintf(gTraceFile, "  tsc      : %ld\t", info->tsc);
+    dr_fprintf(gTraceFile, "  tsc      : %ld\n", info->tsc);
 
     //dr_fprintf(gTraceFile, "  info ptr  : %p\n", info->info);
 	return;
