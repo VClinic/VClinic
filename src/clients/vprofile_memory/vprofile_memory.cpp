@@ -51,6 +51,7 @@ VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
 
 template<int size, int esize, bool is_float>
 void update(val_info_t *info) {
+    printf("addr %lu, type %u, ctxt_hndl %d, tsc %lu, pc %lu\n", info->addr, info->type, info->ctxt_hndl, info->tsc, info->pc);
 	return;
 }
 
@@ -94,6 +95,10 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     vprofile_opts.user_data_cb = NULL;
     vprofile_opts.ins_instrument_cb = NULL;
     vprofile_opts.bb_instrument_cb = NULL;
+
+    dr_fprintf(STDOUT, "[CLIENT LOG] enable cct collection!\n");
+    ex_flag = VPROFILE_COLLECT_CCT;
+    ex_trace_flag = VPROFILE_TRACE_CCT;
 
     if (op_enable_cct.get_value()) {
         dr_fprintf(STDOUT, "[CLIENT LOG] enable cct collection!\n");

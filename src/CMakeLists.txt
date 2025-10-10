@@ -8,6 +8,12 @@ cmake_minimum_required(VERSION 3.7)
 
 include(../make/policies.cmake NO_POLICY_SCOPE)
 
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+    message("AARCH64")
+    #add_definitions(-DAARCH64)
+endif()
+
+
 set(DynamoRIO_INTERNAL ON) # do not import dynamorio lib target
 set(DynamoRIO_DIR ${PROJECT_BINARY_DIR}/cmake)
 find_package(DynamoRIO ${VERSION_NUMBER_MAJOR}.${VERSION_NUMBER_MINOR})

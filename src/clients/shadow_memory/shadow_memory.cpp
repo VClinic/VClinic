@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <sys/stat.h>
+#include <omp.h>
 
 #include <dr_api.h>
 #include "drmgr.h"
@@ -11,22 +12,42 @@
 #include "dr_tools.h"
 #include <sys/time.h>
 #include "vprofile.h"
+#include "droption.h"
 
-#define VPROFILE_MEM_TSP_EXIT_PROCESS(format, args...)                            \
-    DRCCTLIB_CLIENT_EXIT_PROCESS_TEMPLATE("vprofile_mem_tsp", format, ##args)
+#include "cache_common.h"
+#include "l1_cache.h"
+#include "l2_cache.h"
+#include "page_table.h"
+
+#define shadow_memory_EXIT_PROCESS(format, args...)                            \
+    DRCCTLIB_CLIENT_EXIT_PROCESS_TEMPLATE("shadow_memory", format, ##args)
 
 #define WINDOW_ENABLE 1000000
 #define WINDOW_DISABLE 100000000
 // #define WINDOW_CLEAN 10
 
-int window_enable;
-int window_disable;
-
-// Client Options
-#include "droption.h"
+ShadowPageTable* spt = new ShadowPageTable();
+int win_enable;
+int win_disable;
 static droption_t<bool> op_enable_sampling
 (DROPTION_SCOPE_CLIENT, "enable_sampling", 0, 0, 64, "Enable Bursty Sampling",
  "Enable bursty sampling for lower overhead with less profiling accuracy.");
+
+ static droption_t<bool> op_enable_cct
+ (DROPTION_SCOPE_CLIENT, "enable_cct", 0, 0, 64, "Enable Calling Context Collection",
+ "Enable calling context collection.");
+
+static droption_t<bool> op_enable_opnd_sampling
+(DROPTION_SCOPE_CLIENT, "enable_opnd_sampling", 0, 0, 64, "Enable Operand-level Bursty Sampling",
+ "Enable bursty sampling for lower overhead with less profiling accuracy.");
+
+static droption_t<bool> op_enable_period_sampling
+(DROPTION_SCOPE_CLIENT, "enable_period_sampling", 0, 0, 64, "Enable Operand-level Periodical Sampling",
+ "Enable periodical sampling for lower overhead with less profiling accuracy.");
+
+static droption_t<int> op_period
+(DROPTION_SCOPE_CLIENT, "period", 100, 1, 10000, "Periodical window size of Operand-level Periodical Sampling",
+ "Periodical window size of Operand-level Periodical Sampling.");
 
 static droption_t<bool> op_help
 (DROPTION_SCOPE_CLIENT, "help", 0, 0, 64, "Show this help",
@@ -68,6 +89,10 @@ typedef struct _per_thread_t {
     file_t output_file;
     int32_t threadId;
     vector<instr_t*> *instr_clones;
+
+    // L1 Data Cache
+    L1Cache* l1d;
+    long long memory_ins_cnt;
 } per_thread_t;
 
 file_t gFlagF;
@@ -90,10 +115,36 @@ enum {
 static reg_id_t tls_seg;
 static uint tls_offs;
 
+
 bool 
 VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
     uint32_t user_mask = (ANY_DATA_TYPE | MEMORY | READ | WRITE | BEFORE | AFTER);
     return ((user_mask & opmask) == opmask);
+}
+
+void ins_handler(L1Cache* l1d, val_info_t *info, per_thread_t* pt){
+    int32_t tid = pt->threadId;
+    // static bool flag = true;
+    
+    if ((info->type) & (vprofile_src_t::MEMORY)){
+        // printf("addr %lu, type %u, ctxt_hndl %d, tsc %lu, pc %lu\n", info->addr, info->type, info->ctxt_hndl, info->tsc, info->pc);
+        // drcctlib_print_backtrace(pt->output_file, info->ctxt_hndl, false, true, 50 /*MAX_CCT_DEPTH*/);
+        if(((info->type) & (vprofile_src_t::READ)) && ((info->type) & (vprofile_src_t::BEFORE))){
+            pt->memory_ins_cnt++;
+            l1d->load(info->addr, info->ctxt_hndl, tid);
+            // drcctlib_print_backtrace(pt->output_file, info->ctxt_hndl, false, true, 50 /*MAX_CCT_DEPTH*/);
+            // printf("read  addr %lu, type %u, ctxt_hndl %d, tsc %lu, pc %lu\n", info->addr, info->type, info->ctxt_hndl, info->tsc, info->pc);
+        }else if(((info->type) & (vprofile_src_t::WRITE)) && ((info->type) & (vprofile_src_t::BEFORE))){
+            pt->memory_ins_cnt++;
+            // drcctlib_print_backtrace(pt->output_file, info->ctxt_hndl, false, true, 50 /*MAX_CCT_DEPTH*/);
+            l1d->store(info->addr, info->ctxt_hndl, tid);
+            // printf("write addr %lu, type %u, ctxt_hndl %d, tsc %lu, pc %lu\n", info->addr, info->type, info->ctxt_hndl, info->tsc, info->pc);
+        }else{
+            // printf("not memory read and nor memory before write\n");
+        }
+    }else{
+        // printf("not memory\n");
+    }
 }
 
 template<int size, int esize, bool is_float>
@@ -101,16 +152,7 @@ void update(val_info_t *info) {
     per_thread_t* pt = (per_thread_t *)drmgr_get_tls_field(dr_get_current_drcontext(), tls_idx);
     file_t gTraceFile = pt->output_file;
 
-    dr_fprintf(gTraceFile, "  type     : 0x%x\t", info->type);
-    //dr_fprintf(gTraceFile, "  is_float : %d\t", info->is_float);
-    //dr_fprintf(gTraceFile, "  size     : %zu\t", info->size);
-    //dr_fprintf(gTraceFile, "  esize    : %zu\t", info->esize);
-    dr_fprintf(gTraceFile, "  addr     : %p\t", info->addr);
-    dr_fprintf(gTraceFile, "  app pc   : %ld\t", info->pc);
-    dr_fprintf(gTraceFile, "  tsc      : %ld\n", info->tsc);
-
-    //dr_fprintf(gTraceFile, "  info ptr  : %p\n", info->info);
-	return;
+    ins_handler(pt->l1d, info, pt);
 }
 
 /*
@@ -120,15 +162,18 @@ void update(val_info_t *info) {
 }
 */
 
+/*
 static void 
 basic_block_isb(void *drcontext, instrlist_t *bb) {
     instr_t* ins = instrlist_first(bb);
     MINSERT(bb, ins, instr_create_0dst_1src(drcontext, OP_isb, OPND_CREATE_INT8(15)));
 }
+*/
 
 static void
-ThreadOutputFileInit(per_thread_t *pt)
+ThreadOutputFileInit(per_thread_t *pt, void *drcontext)
 {
+    // int32_t id = dr_get_thread_id(drcontext);
     int32_t id = drcctlib_get_thread_id();
     pt->threadId = id;
     char name[MAXIMUM_PATH] = "";
@@ -136,9 +181,9 @@ ThreadOutputFileInit(per_thread_t *pt)
     pt->output_file = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     DR_ASSERT(pt->output_file != INVALID_FILE);
     if (op_enable_sampling.get_value()) {
-        dr_fprintf(pt->output_file, "[ZEROSPY INFO] Sampling Enabled\n");
+        dr_fprintf(pt->output_file, "[shaodw_memory INFO] Sampling Enabled\n");
     } else {
-        dr_fprintf(pt->output_file, "[ZEROSPY INFO] Sampling Disabled\n");
+        dr_fprintf(pt->output_file, "[shaodw_memory INFO] Sampling Disabled\n");
     }
 }
 
@@ -148,7 +193,7 @@ ClientThreadStart(void *drcontext)
     // assert(dr_get_itimer(ITIMER_REAL));
     per_thread_t *pt = (per_thread_t *)dr_thread_alloc(drcontext, sizeof(per_thread_t));
     if (pt == NULL) {
-        VPROFILE_MEM_TSP_EXIT_PROCESS("pt == NULL");
+        shadow_memory_EXIT_PROCESS("pt == NULL");
     }
     pt->INTRedLogMap = new INTRedLogMap_t();
     pt->FPRedLogMap = new FPRedLogMap_t();
@@ -157,20 +202,29 @@ ClientThreadStart(void *drcontext)
     pt->instr_clones = new vector<instr_t*>();
     drmgr_set_tls_field(drcontext, tls_idx, (void *)pt);
     // init output files
-    ThreadOutputFileInit(pt);
+    ThreadOutputFileInit(pt, drcontext);
+
+    // ShadowPageTable* spt = new ShadowPageTable();
+    pt->memory_ins_cnt=0;
+    L2Cache* l2 = new L2Cache(L2_CACHE_SIZE, spt);
+    pt->l1d = new L1Cache(L1_CACHE_SIZE, L1Type::DATA, l2, spt, pt->output_file);
 }
 
 static void
 ClientThreadEnd(void *drcontext)
 {
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    pt->l1d->print_result();
     dr_close_file(pt->output_file);
     for(size_t i=0;i<pt->instr_clones->size();++i) {
         instr_destroy(drcontext, (*pt->instr_clones)[i]);
     }
+    printf("\n\ntotal memory cnt %lld\n\n", pt->memory_ins_cnt);
     delete pt->instr_clones;
     delete pt->INTRedLogMap;
     delete pt->FPRedLogMap;
+    delete pt->l1d;
+
 #ifdef DEBUG_REUSE
     dr_close_file(pt->log_file);
 #endif 
@@ -196,35 +250,35 @@ ClientInit(int argc, const char *argv[])
     char name[MAXIMUM_PATH] = "x86-";
 #endif
     gethostname(name + strlen(name), MAXIMUM_PATH - strlen(name));
-    sprintf(name + strlen(name), "-%d-MEM_TSP", pid);
+    sprintf(name + strlen(name), "-%d-shadow_memory", pid);
     g_folder_name.assign(name, strlen(name));
     mkdir(g_folder_name.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
 
-    dr_fprintf(STDOUT, "[MEM_TSP INFO] Profiling result directory: %s\n", g_folder_name.c_str());
+    dr_fprintf(STDOUT, "[shadow_memory INFO] Profiling result directory: %s\n", g_folder_name.c_str());
 
-    sprintf(name+strlen(name), "/MEM_TSP.log");
+    sprintf(name+strlen(name), "/shadow_memory.log");
     gFile = dr_open_file(name, DR_FILE_WRITE_OVERWRITE | DR_FILE_ALLOW_LARGE);
     gJson = fopen("report.json", "w");
     DR_ASSERT(gFile != INVALID_FILE);
     DR_ASSERT(gJson != NULL);
     if (op_enable_sampling.get_value()) {
-        dr_fprintf(STDOUT, "[MEM_TSP INFO] Sampling Enabled\n");
-        dr_fprintf(gFile, "[MEM_TSP INFO] Sampling Enabled\n");
-        window_enable = op_window_enable.get_value();
-        window_disable= op_window.get_value();
-        float rate = (float)window_enable / (float)window_disable;
-        dr_fprintf(STDOUT, "[MEM_TSP INFO] Sampling Rate: %.3f, Window Size: %ld\n", rate, window_disable);
-        dr_fprintf(gFile,  "[MEM_TSP INFO] Sampling Rate: %.3f, Window Size: %ld\n", rate, window_disable);
+        dr_fprintf(STDOUT, "[shadow_memory INFO] Sampling Enabled\n");
+        dr_fprintf(gFile, "[shadow_memory INFO] Sampling Enabled\n");
+        win_enable = op_window_enable.get_value();
+        win_disable= op_window.get_value();
+        float rate = (float)win_enable / (float)win_disable;
+        dr_fprintf(STDOUT, "[shadow_memory INFO] Sampling Rate: %.3f, Window Size: %ld\n", rate, win_disable);
+        dr_fprintf(gFile,  "[shadow_memory INFO] Sampling Rate: %.3f, Window Size: %ld\n", rate, win_disable);
     } else {
-        dr_fprintf(STDOUT, "[MEM_TSP INFO] Sampling Disabled\n");
-        dr_fprintf(gFile, "[MEM_TSP INFO] Sampling Disabled\n");
+        dr_fprintf(STDOUT, "[shadow_memory INFO] Sampling Disabled\n");
+        dr_fprintf(gFile, "[shadow_memory INFO] Sampling Disabled\n");
     }
     if (dr_using_all_private_caches()) {
-        dr_fprintf(STDOUT, "[MEM_TSP INFO] Thread Private is enabled.\n");
-        dr_fprintf(gFile,  "[MEM_TSP INFO] Thread Private is enabled.\n");
+        dr_fprintf(STDOUT, "[shadow_memory INFO] Thread Private is enabled.\n");
+        dr_fprintf(gFile,  "[shadow_memory INFO] Thread Private is enabled.\n");
     } else {
-        dr_fprintf(STDOUT, "[MEM_TSP INFO] Thread Private is disabled.\n");
-        dr_fprintf(gFile,  "[MEM_TSP INFO] Thread Private is disabled.\n");
+        dr_fprintf(STDOUT, "[shadow_memory INFO] Thread Private is disabled.\n");
+        dr_fprintf(gFile,  "[shadow_memory INFO] Thread Private is disabled.\n");
     }
     if (op_help.get_value()) {
         dr_fprintf(STDOUT, "%s\n", droption_parser_t::usage_long(DROPTION_SCOPE_CLIENT).c_str());
@@ -242,7 +296,6 @@ ClientInit(int argc, const char *argv[])
 static void
 ClientExit(void)
 {
-
 #ifndef _WERROR
     if(warned) {
         dr_fprintf(gFile, "####################################\n");
@@ -254,15 +307,15 @@ ClientExit(void)
     dr_close_file(gFile);
     fclose(gJson);
     if (!dr_raw_tls_cfree(tls_offs, INSTRACE_TLS_COUNT)) {
-        VPROFILE_MEM_TSP_EXIT_PROCESS(
-            "ERROR: zerospy dr_raw_tls_calloc fail");
+        shadow_memory_EXIT_PROCESS(
+            "ERROR: shaodw_memory dr_raw_tls_cfree fail");
     }
 
     dr_mutex_destroy(gLock);
     if (!drmgr_unregister_thread_init_event(ClientThreadStart) ||
         !drmgr_unregister_thread_exit_event(ClientThreadEnd) ||
         !drmgr_unregister_tls_field(tls_idx)) {
-        printf("ERROR: zerospy failed to unregister in ClientExit");
+        printf("ERROR: shaodw_memory failed to unregister in ClientExit");
         fflush(stdout);
         exit(-1);
     }
@@ -277,13 +330,47 @@ extern "C" {
 DR_EXPORT void
 dr_client_main(client_id_t id, int argc, const char *argv[])
 {
-    dr_set_client_name("DynamoRIO Client 'vprofile_memory'",
+    dr_set_client_name("DynamoRIO Client 'shadow_memory'",
                        "http://dynamorio.org/issues");
     ClientInit(argc, argv);
+    uint8_t ex_flag = 0;
+    uint32_t ex_trace_flag = 0;
+    win_enable = op_window_enable.get_value();
+    win_disable = op_window.get_value();
+    vprofile_options_t vprofile_opts;
+    vprofile_opts.win_disable = win_disable;
+    vprofile_opts.win_enable = win_enable;
+    vprofile_opts.filter = VPROFILE_FILTER_ALL_INSTR;
+    vprofile_opts.user_data_cb = NULL;
+    vprofile_opts.ins_instrument_cb = NULL;
+    vprofile_opts.bb_instrument_cb = NULL;
 
+    dr_fprintf(STDOUT, "[CLIENT LOG] default enable cct collection!\n");
+    ex_flag = VPROFILE_COLLECT_CCT;
+    ex_trace_flag = VPROFILE_TRACE_CCT;
 
-    if (!vprofile_init(VPROFILE_FILTER_ALL_INSTR, NULL, NULL, basic_block_isb, VPROFILE_DEFAULT)) {
-        VPROFILE_MEM_TSP_EXIT_PROCESS("ERROPR: unable to initialize vprofile");
+    if (op_enable_cct.get_value()) {
+        dr_fprintf(STDOUT, "[CLIENT LOG] enable cct collection!\n");
+        ex_flag = VPROFILE_COLLECT_CCT;
+        ex_trace_flag = VPROFILE_TRACE_CCT;
+    }
+    if (op_enable_sampling.get_value()) {
+        dr_fprintf(STDOUT, "[CLIENT LOG] sampling enabled!\n");
+        vprofile_opts.flag = VPROFILE_SAMPLE_BURSTY_INSTRUCTION | ex_flag;
+        vprofile_init_ex(&vprofile_opts);
+    } else if(op_enable_opnd_sampling.get_value()) {
+        dr_fprintf(STDOUT, "[CLIENT LOG] operand sampling enabled!\n");
+        vprofile_opts.flag = VPROFILE_SAMPLE_BURSTY_OPERAND | ex_flag;
+        vprofile_init_ex(&vprofile_opts);
+    } else if(op_enable_period_sampling.get_value()) {
+        int window = op_period.get_value();
+        dr_fprintf(STDOUT, "[CLIENT LOG] periodical sampling enabled: window=%d!\n", window);
+        vprofile_opts.flag = VPROFILE_SAMPLE_PERIODICAL_OPERAND | ex_flag;
+        vprofile_init_ex(&vprofile_opts);
+        vprofile_set_period_sampling_window(window);
+    } else {
+        vprofile_opts.flag = VPROFILE_DEFAULT | ex_flag;
+        vprofile_init_ex(&vprofile_opts);
     }
 
     if(op_enable_sampling.get_value()) {
@@ -299,22 +386,21 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
 
     if (   !drmgr_register_thread_init_event_ex(ClientThreadStart, &thread_init_pri) 
         || !drmgr_register_thread_exit_event_ex(ClientThreadEnd, &thread_exit_pri) ) {
-        VPROFILE_MEM_TSP_EXIT_PROCESS("ERROR:unable to register events");
+        shadow_memory_EXIT_PROCESS("ERROR:unable to register events");
     }
 
     tls_idx = drmgr_register_tls_field();
     if (tls_idx == -1) {
-        VPROFILE_MEM_TSP_EXIT_PROCESS("ERROR:drmgr_register_tls_field fail");
+        shadow_memory_EXIT_PROCESS("ERROR:drmgr_register_tls_field fail");
     }
     if (!dr_raw_tls_calloc(&tls_seg, &tls_offs, INSTRACE_TLS_COUNT, 0)) {
-        VPROFILE_MEM_TSP_EXIT_PROCESS(
+        shadow_memory_EXIT_PROCESS(
             "ERROR: dr_raw_tls_calloc fail");
     }
     gLock = dr_mutex_create();
 
-    dr_register_exit_event(ClientExit);
-
-    vtrace = vprofile_allocate_trace(VPROFILE_TRACE_ADDR_TSC_PC | VPROFILE_TRACE_BEFORE_WRITE);
+    vtrace = vprofile_allocate_trace(VPROFILE_TRACE_CCT_ADDR | VPROFILE_TRACE_BEFORE_WRITE);
+    // vtrace = vprofile_allocate_trace(VPROFILE_TRACE_CCT_ADDR_TSC_PC | VPROFILE_TRACE_BEFORE_WRITE);
     uint32_t opnd_mask = (ANY_DATA_TYPE | MEMORY | READ | WRITE | BEFORE | AFTER);
 
     vprofile_register_trace_template_cb(vtrace, VPROFILE_FILTER_OPND, opnd_mask, update);
