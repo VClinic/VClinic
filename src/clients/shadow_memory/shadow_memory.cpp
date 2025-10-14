@@ -13,6 +13,8 @@
 #include "vprofile.h"
 #include "droption.h"
 
+#include "l1_cache.h"
+
 #define shadow_memory_EXIT_PROCESS(format, args...)                            \
     DRCCTLIB_CLIENT_EXIT_PROCESS_TEMPLATE("shadow_memory", format, ##args)
 
@@ -82,6 +84,9 @@ typedef struct _per_thread_t {
     file_t output_file;
     int32_t threadId;
     vector<instr_t*> *instr_clones;
+
+    // L1 Data Cache
+    L1Cache* l1d;
 } per_thread_t;
 
 file_t gFlagF;
@@ -104,6 +109,7 @@ enum {
 static reg_id_t tls_seg;
 static uint tls_offs;
 
+
 bool 
 VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
     uint32_t user_mask = (ANY_DATA_TYPE | MEMORY | READ | WRITE | BEFORE | AFTER);
@@ -115,7 +121,8 @@ void update(val_info_t *info) {
     per_thread_t* pt = (per_thread_t *)drmgr_get_tls_field(dr_get_current_drcontext(), tls_idx);
     file_t gTraceFile = pt->output_file;
 
-	return;
+    if (info->type & vprofile_src_t::MEMORY_READ)
+        pt->l1d->read(info);
 }
 
 /*
@@ -163,6 +170,8 @@ ClientThreadStart(void *drcontext)
     drmgr_set_tls_field(drcontext, tls_idx, (void *)pt);
     // init output files
     ThreadOutputFileInit(pt, drcontext);
+
+    pt->l1d = new L1Cache(32, L1Type::DATA);
 }
 
 static void
