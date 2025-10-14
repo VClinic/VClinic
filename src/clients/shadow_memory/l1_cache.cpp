@@ -9,6 +9,7 @@ L1Cache::L1Cache(uint32_t size_kb, L1Type type)
     uint32_t num_sets = cache_size / (CACHE_LINE_SIZE * L1_ASSOCIATIVITY);
     group_cap = (uint32_t *)malloc(num_sets * sizeof(uint32_t));
     memset(group_cap, 0, sizeof(uint32_t) * num_sets);
+    
     // 初始化每组的4个路（默认均为INVALID状态）
     cache_sets.resize(num_sets, std::vector<CacheLine>(L1_ASSOCIATIVITY));
 
