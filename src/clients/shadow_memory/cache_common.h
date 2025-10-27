@@ -6,11 +6,12 @@
 #include <unordered_map>
 
 // 1. 文档定义的硬件参数（2.6.1/2.7.1节）
-const uint32_t L1_CACHE_SIZE = 32;
+const uint32_t L1_CACHE_SIZE = 64;          // L1 Cache size 64 KB
+const uint32_t L2_CACHE_SIZE = 128;         // L2 Cache size 128 KB
 const uint32_t CACHE_LINE_SIZE = 64;       // 所有层级行大小均为64字节（{insert\_element\_0\_}、{insert\_element\_1\_}、{insert\_element\_2\_}）
 const uint32_t L1_ASSOCIATIVITY = 4;       // L1I/L1D均为4路组相联（{insert\_element\_3\_}、{insert\_element\_4\_}）
 const uint32_t L2_ASSOCIATIVITY = 4;       // L2为4路组相联（{insert\_element\_5\_}）
-const uint32_t L3_ASSOCIATIVITY = 8;       // L3默认8路组相联（文档未明确，参考DSU通用设计）
+// const uint32_t L3_ASSOCIATIVITY = 8;       // L3默认8路组相联（文档未明确，参考DSU通用设计）
 
 // 2. MESI状态（2.6.2.5节，{insert\_element\_6\_}~{insert\_element\_7\_}）
 enum class MESIState {
@@ -22,11 +23,11 @@ enum class MESIState {
 
 // 3. 缓存行结构（存储Tag、MESI状态、数据、脏位等核心信息）
 struct CacheLine {
-    uint64_t tag = -1;              // 物理地址的Tag部分（VIPT中L1D用物理Tag，{insert\_element\_12\_}）
+    uint64_t tag = 0;              // 物理地址的Tag部分（VIPT中L1D用物理Tag，{insert\_element\_12\_}）
     MESIState state = MESIState::INVALID;  // 行状态
     bool is_dirty = false;         // 脏位（仅M状态为true，{insert\_element\_13\_}）
     // uint8_t data[CACHE_LINE_SIZE] = {0};  // 行数据
-    uint32_t lru_counter = 0;      // LRU替换算法计数器（数值越小越久未使用）
+    uint32_t lru_counter = 0;      // LRU替换算法计数器 (数越大，越久未访问)
 };
 
 // 4. 地址拆分工具（将物理地址拆分为Tag、Index、Offset，适配不同缓存大小）

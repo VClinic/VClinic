@@ -9,3 +9,41 @@ L2Cache::L2Cache(uint32_t size_kb)
     // 初始化每组的4个路（默认状态为INVALID）
     cache_sets.resize(num_sets, std::vector<CacheLine>(L2_ASSOCIATIVITY));
 }
+
+void L2Cache::ask_l2(uint64_t addr){
+    uint64_t tag;
+    uint32_t index, offset, way;
+    AddressSplitter::split(addr, cache_size, tag, index, offset);
+
+    // find cacheline
+
+    // L2 Hit
+    if(){
+        // check sm status
+
+        // if sm status is clean --> make l2 cacheline invalid & transfer data to l1
+        return;
+
+        // if sm status is dirty --> treated as l2 miss & transfer data to l1
+        return;
+    }
+    // L2 Miss
+    else{
+        // transfer data to l1
+        return;
+    }
+}
+
+void L2Cache::evicted_from_l1(uint64 addr){
+    // assert l2 do not have addr (data cache)
+
+    // L2 has free cache line
+    if(){
+
+    }
+    // L2 has NO free cache line
+    else{
+        // find LRU cache line & evict
+
+    }
+}
