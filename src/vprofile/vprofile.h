@@ -164,13 +164,13 @@ struct val_info_t {
   // vprofile_src_t
   uint32_t type;
   int32_t ctxt_hndl;
+  uint64_t tsc;
+  uint64_t pc;
   void *val;
   void *info;
   uint8_t size;
   uint8_t esize;
   bool is_float;
-  uint64_t tsc;
-  uint64_t pc;
 };
 
 typedef struct {

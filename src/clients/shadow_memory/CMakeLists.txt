@@ -20,8 +20,11 @@ endif (UNIX)
 # add third-party libraries
 
 add_library(shadow_memory SHARED
-l1_cache.cpp shadow_memory.cpp
-  )
+  l1_cache.cpp
+  l2_cache.cpp
+  page_table.cpp
+  shadow_memory.cpp
+)
 
 configure_DynamoRIO_client(shadow_memory)
 # use_DynamoRIO_extension(shadow_memory drsym)
