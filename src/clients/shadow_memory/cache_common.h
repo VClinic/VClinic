@@ -5,6 +5,8 @@
 #include <vector>
 #include <unordered_map>
 
+#include "page_table.h"
+
 // 1. 文档定义的硬件参数（2.6.1/2.7.1节）
 const uint32_t L1_CACHE_SIZE = 64;          // L1 Cache size 64 KB
 const uint32_t L2_CACHE_SIZE = 128;         // L2 Cache size 128 KB
@@ -23,9 +25,12 @@ enum class MESIState {
 
 // 3. 缓存行结构（存储Tag、MESI状态、数据、脏位等核心信息）
 struct CacheLine {
-    uint64_t tag = 0;              // 物理地址的Tag部分（VIPT中L1D用物理Tag，{insert\_element\_12\_}）
-    MESIState state = MESIState::INVALID;  // 行状态
-    bool is_dirty = false;         // 脏位（仅M状态为true，{insert\_element\_13\_}）
+    uint64_t addr = 0;
+    uint64_t tag = 0;              // 物理地址的Tag部分（VIPT中L1D用物理Tag）
+    ShadowPage* sp = nullptr;
+    bool empty = true;
+    // MESIState state = MESIState::INVALID;  // 行状态
+    // bool is_dirty = false;         // 脏位（仅M状态为true）
     // uint8_t data[CACHE_LINE_SIZE] = {0};  // 行数据
     uint32_t lru_counter = 0;      // LRU替换算法计数器 (数越大，越久未访问)
 };

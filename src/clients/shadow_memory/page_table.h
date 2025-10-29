@@ -1,4 +1,7 @@
 // 简化示例实现；工程中应把错误处理、对齐、内存回收等完善
+#ifndef PAGE_TABLE
+#define PAGE_TABLE
+
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -19,10 +22,10 @@ constexpr int L2_BITS = 9;
 constexpr int L1_BITS = 9;
 
 
-struct CacheLine {
-    size_t Lasttid;
-    uint8_t LastOP;
-}
+// struct CacheLine {
+//     size_t Lasttid;
+//     uint8_t LastOP;
+// };
 
 // ---- 每个叶子页 ----
 class ShadowPage {
@@ -38,7 +41,7 @@ private:
     uint8_t data[LINES_PER_PAGE];
 public:
     ShadowPage() {
-        thread_dirty_bitmap.store(0);
+        for(size_t i=0; i < MAX_THREADS; i++)   thread_dirty_bitmap[i].store(0);
         for (size_t i = 0; i < LINES_PER_PAGE; ++i) line_version[i].store(0);
         std::memset(data, 0, LINES_PER_PAGE);
     }
@@ -50,7 +53,7 @@ public:
     bool read(uint64_t addr, int32_t tid);
 
     // set cache of addt to dirty for all threads ;return if cache of addr is dirty
-    void write(uint64_t addr, int32_t tid);
+    bool write(uint64_t addr, int32_t tid);
 };
 
 // ---- 页表节点 ----
@@ -81,4 +84,6 @@ public:
 
     // return page hadler for addr, new page will be created if no page was found
     ShadowPage* get_or_create_page(uint64_t addr);
-}
+};
+
+#endif  // PAGE_TABLE

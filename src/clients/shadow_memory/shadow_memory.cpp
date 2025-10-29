@@ -13,7 +13,10 @@
 #include "vprofile.h"
 #include "droption.h"
 
+#include "cache_common.h"
 #include "l1_cache.h"
+#include "l2_cache.h"
+#include "page_table.h"
 
 #define shadow_memory_EXIT_PROCESS(format, args...)                            \
     DRCCTLIB_CLIENT_EXIT_PROCESS_TEMPLATE("shadow_memory", format, ##args)
@@ -116,13 +119,21 @@ VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
     return ((user_mask & opmask) == opmask);
 }
 
+
+void ins_handler(L1Cache* l1d, val_info_t *info, per_thread_t* pt){
+    int32_t tid = pt->threadId;
+    if (info->type & vprofile_src_t::MEMORY_READ)
+        l1d->load(info->addr, tid);
+    // else if (info->type & vprofile_src_t::MEMORY_WRITE)
+    //     l1d->store(info->addr, tid);
+}
+
 template<int size, int esize, bool is_float>
 void update(val_info_t *info) {
     per_thread_t* pt = (per_thread_t *)drmgr_get_tls_field(dr_get_current_drcontext(), tls_idx);
     file_t gTraceFile = pt->output_file;
 
-    if (info->type & vprofile_src_t::MEMORY_READ)
-        pt->l1d->read(info);
+    ins_handler(pt->l1d, info, pt);
 }
 
 /*
@@ -171,7 +182,9 @@ ClientThreadStart(void *drcontext)
     // init output files
     ThreadOutputFileInit(pt, drcontext);
 
-    pt->l1d = new L1Cache(32, L1Type::DATA);
+    ShadowPageTable* spt = new ShadowPageTable();
+    L2Cache* l2 = new L2Cache(L2_CACHE_SIZE, spt);
+    pt->l1d = new L1Cache(L1_CACHE_SIZE, L1Type::DATA, l2, spt);
 }
 
 static void
@@ -185,6 +198,8 @@ ClientThreadEnd(void *drcontext)
     delete pt->instr_clones;
     delete pt->INTRedLogMap;
     delete pt->FPRedLogMap;
+    delete pt->l1d;
+
 #ifdef DEBUG_REUSE
     dr_close_file(pt->log_file);
 #endif 
