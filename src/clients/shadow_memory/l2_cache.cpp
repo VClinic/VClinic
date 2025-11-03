@@ -49,7 +49,7 @@ void L2Cache::ask_l2(uint64_t addr, int32_t tid){
     else{
         // l2 miss
         // transfer data to l1
-        printf("l2 miss transfer data to l1\n");
+        // printf("addr %lu l2 miss transfer data to l1\n", addr);
         return;
     }
 }
@@ -61,13 +61,14 @@ void L2Cache::evicted_from_l1(uint64_t addr, int32_t tid){
     // assert l2 do not have addr (data cache)
     assert(find_cacheline(index, tag, way) == false);
 
-    uint32_t free_cacheline = find_freecacheline(index, tid);
+    int32_t free_cacheline = find_freecacheline(index, tid);
     CacheLine* target_cacheline = nullptr;
+    assert(free_cacheline >= -1 && free_cacheline < (int32_t)L2_ASSOCIATIVITY);
 
     // L2 has free cache line
     if(free_cacheline >= 0){
         target_cacheline = &(cache_sets[index][way]);
-        way = free_cacheline;
+        way = (uint32_t)free_cacheline;
     }
     // L2 has NO free cache line
     else{
@@ -82,6 +83,7 @@ void L2Cache::evicted_from_l1(uint64_t addr, int32_t tid){
     target_cacheline->sp = spt->get_or_create_page(addr);
     target_cacheline->empty = false;
 
+    assert(way >= 0 && way < L2_ASSOCIATIVITY);
     update_lru(index, way);
 }
 
@@ -116,7 +118,7 @@ uint32_t L2Cache::find_lru(uint32_t group_index){
     return target way if has free cacheline
     return -1 if has no free cacheline
 */
-uint32_t L2Cache::find_freecacheline(uint32_t group_index, int32_t tid){
+int32_t L2Cache::find_freecacheline(uint32_t group_index, int32_t tid){
     for(uint32_t i = 0; i < L2_ASSOCIATIVITY; i++){
         if(cache_sets[group_index][i].empty ||  /* or sm status is dirty ? */
             cache_sets[group_index][i].sp->is_dirty(cache_sets[group_index][i].addr, tid))

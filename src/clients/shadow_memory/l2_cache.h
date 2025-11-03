@@ -20,7 +20,7 @@ class L2Cache {
         void update_lru(uint32_t group_index, uint32_t way);
         uint32_t find_lru(uint32_t group_index);
 
-        uint32_t find_freecacheline(uint32_t group_index, int32_t tid);
+        int32_t find_freecacheline(uint32_t group_index, int32_t tid);
         bool find_cacheline(uint32_t index, uint64_t tag, uint32_t& way);
 };
 

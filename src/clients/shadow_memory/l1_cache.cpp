@@ -13,6 +13,9 @@ L1Cache::L1Cache(uint32_t size_kb, L1Type type, L2Cache* l2, ShadowPageTable* sp
     // 初始化每组的4个路（默认均为INVALID EMPTY状态）
     cache_sets.resize(num_sets, std::vector<CacheLine>(L1_ASSOCIATIVITY));
 
+    l1_load_miss_cnt = 0;
+    l1_store_miss_cnt = 0;
+
     printf(">>>>>>>> L1Cache Init <<<<<<<<\n");
     printf("L1Cache size %dKB\n", size_kb);
     printf("L1Cache cacheline size %dB\n", CACHE_LINE_SIZE);
@@ -21,6 +24,9 @@ L1Cache::L1Cache(uint32_t size_kb, L1Type type, L2Cache* l2, ShadowPageTable* sp
 }
 
 L1Cache::~L1Cache(){
+    printf("L1Cache l1_load_miss_cnt %ld\n", l1_load_miss_cnt);
+    printf("L1Cache l1_store_miss_cnt %ld\n", l1_store_miss_cnt);
+    
     delete l2;
     delete spt;
 }
@@ -49,14 +55,18 @@ void L1Cache::load(uint64_t addr, int32_t tid){
     if(in_l1){
         // check addr status in shadow memory
         CacheLine& hit_cacheline = cache_sets[index][way];
+        // printf("addr %lu l1 hit, try to see sm is_dirty tid %d\n", addr, tid);
         bool sm_status = hit_cacheline.sp->is_dirty(addr, tid);
         
         // if sm status clean
         // update LRU
         // update sm status
         if(sm_status == false){
+            // printf("addr %lu l1 hit, sm clean update lru\n", addr);
             update_lru(index, way);
+            // printf("addr %lu l1 hit, try to sp->read\n", addr);
             hit_cacheline.sp->read(addr, tid);
+            // printf("addr %lu l1 hit, done sp->read\n", addr);
             return;
         }
 
@@ -66,26 +76,33 @@ void L1Cache::load(uint64_t addr, int32_t tid){
         // update sm status
         // treated as l1d load miss (read allocation)
         else{
+            // printf("addr %lu l1 hit, sm dirty update lru\n", addr);
             update_lru(index, way);
+            // printf("addr %lu l1 hit, try to sp->read\n", addr);
             hit_cacheline.sp->read(addr, tid);
+            // printf("addr %lu l1 hit, done sp->read\n", addr);
+            l1_load_miss_cnt++;
             return;
         }
     }
     // L1 Miss
     else{
         // l1d load miss
+        l1_load_miss_cnt++;
         // Ask L2
-        printf("l1 miss as l2\n");
+        // printf("addr %lu l1 miss ask l2\n", addr);
         l2->ask_l2(addr, tid);
 
         // insert cache line
         // update sm status (read)
+        // printf("addr %lu l1 miss, insert cacheline \n", addr);
         way = insert_cacheline(addr, tag, index, tid);
+        // printf("addr %lu l1 miss, update lru\n", addr);
         update_lru(index, way);
         CacheLine& target_cacheline = cache_sets[index][way];
-        printf("l1 try to sp->read\n");
+        // printf("addr %lu l1 try to sp->read tid %d \n", addr, tid);
         target_cacheline.sp->read(addr, tid);
-        printf("l1 done to sp->read\n");
+        // printf("addr %lu l1 done to sp->read\n", addr);
 
         return;
     }
@@ -121,12 +138,14 @@ void L1Cache::store(uint64_t addr, int32_t tid){
         else{
             update_lru(index, way);
             hit_cacheline.sp->write(addr, tid);
+            l1_store_miss_cnt++;
             return;
         }
     }
     // L1 Miss
     else{
         // l1 store miss
+        l1_store_miss_cnt++;
         // Ask L2
         l2->ask_l2(addr, tid);
 
@@ -145,11 +164,13 @@ void L1Cache::store(uint64_t addr, int32_t tid){
     return evicted line way if group has no free line and evict and insert
 */
 uint32_t L1Cache::insert_cacheline(uint64_t addr, uint64_t tag, uint32_t group_index, int32_t tid){
-    uint32_t free_line_way = find_freecacheline(group_index, tid);
+    int32_t free_line_way = find_freecacheline(group_index, tid);
+    assert(free_line_way < (int32_t)L1_ASSOCIATIVITY && free_line_way >= -1);
     CacheLine* new_line = nullptr;
 
     // Free line exist
     if(free_line_way >= 0){
+        // printf("got free line %d\n", free_line_way);
         new_line = &(cache_sets[group_index][free_line_way]);
     }
     // No free line, need evict
@@ -157,14 +178,18 @@ uint32_t L1Cache::insert_cacheline(uint64_t addr, uint64_t tag, uint32_t group_i
         // use LRU to fine evicted_line
         uint32_t evicted_way = find_lru(group_index);
         free_line_way = evicted_way;
+        // printf("got evicted line %d\n", free_line_way);
         
         // check evicted_line sm status
         new_line = &(cache_sets[group_index][evicted_way]);
+        // printf("addr %lu insert_cacheline check sm is_dirty\n", addr);
         bool sm_status = new_line->sp->is_dirty(addr, tid);
         
         // if sm status clean --> evict to L2
         if(sm_status == false){
+            // printf("addr %lu l1 evict to l2\n", addr);
             l2->evicted_from_l1(addr, tid);
+            // printf("addr %lu l1 evict to l2 done \n", addr);
         }
         // if sm status dirty --> invalid
         else{
@@ -176,8 +201,9 @@ uint32_t L1Cache::insert_cacheline(uint64_t addr, uint64_t tag, uint32_t group_i
     new_line->tag = tag;
     new_line->sp = spt->get_or_create_page(addr);
     new_line->empty = false;
+    assert(free_line_way < (int32_t)L1_ASSOCIATIVITY && free_line_way >= 0);
 
-    return free_line_way;
+    return (uint32_t)free_line_way;
 }
 
 uint32_t L1Cache::find_lru(uint32_t group_index){
@@ -211,7 +237,7 @@ void L1Cache::update_lru(uint32_t group_index, uint32_t way){
     return target way if has free cacheline
     return -1 if has no free cacheline
 */
-uint32_t L1Cache::find_freecacheline(uint32_t group_index, int32_t tid){
+int32_t L1Cache::find_freecacheline(uint32_t group_index, int32_t tid){
     for(uint32_t i = 0; i < L1_ASSOCIATIVITY; i++){
         if(cache_sets[group_index][i].empty ||  /* or sm status is dirty ? */
             cache_sets[group_index][i].sp->is_dirty(cache_sets[group_index][i].addr, tid))

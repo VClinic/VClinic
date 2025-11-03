@@ -17,7 +17,7 @@ public:
     // 构造函数：输入缓存大小（16KB/32KB/64KB）、L2引用、L1类型
     L1Cache(uint32_t size_kb, L1Type type, L2Cache* l2, ShadowPageTable* spt);
     ~L1Cache();
-    
+
     // test
     void print_here(val_info_t *info);
     
@@ -31,13 +31,15 @@ private:
     std::vector<std::vector<CacheLine>> cache_sets;  // cache_sets[index][way] = CacheLine
     L2Cache* l2;
     ShadowPageTable* spt;
+    int64_t l1_load_miss_cnt;
+    int64_t l1_store_miss_cnt;
     
     uint32_t insert_cacheline(uint64_t addr, uint64_t tag, uint32_t group_index, int32_t tid);
     
     uint32_t find_lru(uint32_t group_index);
     void update_lru(uint32_t group_index, uint32_t way);
     
-    uint32_t find_freecacheline(uint32_t group_index, int32_t tid);
+    int32_t find_freecacheline(uint32_t group_index, int32_t tid);
     bool find_cacheline(uint32_t index, uint64_t tag, uint32_t& way);
 };
 

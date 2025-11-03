@@ -1,20 +1,34 @@
 #include "page_table.h"
+#include <iostream>
+#include <exception>
 // 索引掩码函数
 inline uint64_t page_base_of(uint64_t addr) { return addr & ~(uint64_t)(PAGE_SIZE - 1); }
 inline uint64_t offset_in_page(uint64_t addr) { return addr & (PAGE_SIZE - 1); }
 inline size_t line_index_of(uint64_t addr) { return (offset_in_page(addr) / CACHE_LINE); }
 
 bool ShadowPage::is_dirty(uint64_t addr, int32_t tid) {
-    size_t li = line_index_of(addr);
-    uint64_t mask = (1ULL << li);
-    return (thread_dirty_bitmap[tid].load(std::memory_order_acquire) & mask) != 0;
+    try{
+        size_t li = line_index_of(addr);
+        uint64_t mask = (1ULL << li);
+        return (thread_dirty_bitmap[tid].load(std::memory_order_acquire) & mask) != 0;
+    }catch (const std::exception& e) { 
+        // 打印异常信息：e.what() 返回描述性字符串
+        std::cerr << "捕获到标准异常：" << e.what() << std::endl;
+    }
+    exit(0);
 }
 
 bool ShadowPage::read(uint64_t addr, int32_t tid) {
-    size_t li = line_index_of(addr);
-    uint64_t mask = (1ULL << li);
-    uint64_t dirty = thread_dirty_bitmap[tid].fetch_and(~mask, std::memory_order_acquire);
-    return (dirty & mask) != 0;
+    try{
+        size_t li = line_index_of(addr);
+        uint64_t mask = (1ULL << li);
+        uint64_t dirty = thread_dirty_bitmap[tid].fetch_and(~mask, std::memory_order_acquire);
+        return (dirty & mask) != 0;
+    }catch (const std::exception& e) { 
+        // 打印异常信息：e.what() 返回描述性字符串
+        std::cerr << "捕获到标准异常：" << e.what() << std::endl;
+    }
+    exit(0);
 }
 
 bool ShadowPage::write(uint64_t addr, int32_t tid) {

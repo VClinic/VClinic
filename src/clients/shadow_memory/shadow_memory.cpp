@@ -2,6 +2,7 @@
 #include <vector>
 #include <string>
 #include <sys/stat.h>
+#include <omp.h>
 
 #include <dr_api.h>
 #include "drmgr.h"
@@ -124,8 +125,8 @@ void ins_handler(L1Cache* l1d, val_info_t *info, per_thread_t* pt){
     int32_t tid = pt->threadId;
     if (info->type & vprofile_src_t::MEMORY_READ)
         l1d->load(info->addr, tid);
-    // else if (info->type & vprofile_src_t::MEMORY_WRITE)
-    //     l1d->store(info->addr, tid);
+    else if (info->type & vprofile_src_t::MEMORY_WRITE)
+        l1d->store(info->addr, tid);
 }
 
 template<int size, int esize, bool is_float>
@@ -152,7 +153,8 @@ basic_block_isb(void *drcontext, instrlist_t *bb) {
 static void
 ThreadOutputFileInit(per_thread_t *pt, void *drcontext)
 {
-    int32_t id = dr_get_thread_id(drcontext);
+    // int32_t id = dr_get_thread_id(drcontext);
+    int32_t id = drcctlib_get_thread_id();
     pt->threadId = id;
     char name[MAXIMUM_PATH] = "";
     sprintf(name + strlen(name), "%s/thread-%d.topn.log", g_folder_name.c_str(), id);
@@ -319,6 +321,10 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     vprofile_opts.user_data_cb = NULL;
     vprofile_opts.ins_instrument_cb = NULL;
     vprofile_opts.bb_instrument_cb = NULL;
+
+    dr_fprintf(STDOUT, "[CLIENT LOG] default enable cct collection!\n");
+    ex_flag = VPROFILE_COLLECT_CCT;
+    ex_trace_flag = VPROFILE_TRACE_CCT;
 
     if (op_enable_cct.get_value()) {
         dr_fprintf(STDOUT, "[CLIENT LOG] enable cct collection!\n");
