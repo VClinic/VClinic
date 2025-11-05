@@ -24,7 +24,9 @@
 #define WINDOW_DISABLE_DEFAULT 1000000
 
 /* constant defines */
-#define VPROFILE_TRACE_MASK 0xf
+#define VPROFILE_TRACE_MASK 0x3f
+
+
 #ifdef X86
 /* global TLS implementation */
 enum {
@@ -132,11 +134,19 @@ struct cache_CI_t {
 };
 
 #ifdef AARCH64
+struct cache_CATP_t {
+    uint64_t addr;
+    uint64_t tsc;
+    uint64_t pc; 
+    opnd_info_pack_t opnd_info;
+    int32_t ctxt_hndl;
+};
+
 struct cache_ATP_t {
     uint64_t addr;
-    opnd_info_pack_t opnd_info;
     uint64_t tsc;
     uint64_t pc;
+    opnd_info_pack_t opnd_info;
 };
 #endif
 
@@ -529,6 +539,33 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             break;
         }
 #ifdef AARCH64
+        case VPROFILE_TRACE_CCT_ADDR_TSC_PC:
+        {
+            vtracer_get_trace_buffer_in_reg(drcontext, instr, bb, buf, reg_ptr);
+            // addr
+            if(opnd_is_memory_reference(opnd)) {
+                if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
+                        DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
+                }
+                vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_CATP_t, addr));
+            } else if(opnd_is_reg(opnd)) {
+                vtracer_insert_trace_constant(drcontext, instr, bb, (uint32_t)opnd_get_reg(opnd), reg_ptr, scratch, offsetof(cache_CATP_t, addr));
+            }
+            // opnd_info
+            vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(packed_info), reg_ptr, scratch, offsetof(cache_CATP_t, opnd_info));
+            // CCT
+            drcctlib_get_context_handle_in_reg(drcontext, bb, instr, slot, reg_addr, scratch);
+            vtracer_insert_trace_val_native(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_CATP_t, ctxt_hndl));
+            // TSC
+            instrlist_meta_preinsert(bb, instr, INSTR_CREATE_mrs(drcontext, opnd_create_reg(reg_scratch), opnd_create_reg(DR_REG_CNTVCT_EL0)));
+            vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_scratch), reg_ptr, scratch, offsetof(cache_CATP_t, tsc));
+            // PC
+            opnd_t pc = OPND_CREATE_INT64(instr_get_app_pc(instr));
+            vtracer_insert_trace_val(drcontext, instr, bb, pc, reg_ptr, scratch, offsetof(cache_CATP_t, pc));
+            // update buf ptr
+            vtracer_insert_trace_forward(drcontext, instr, bb, sizeof(cache_CATP_t), buf, reg_ptr, scratch);
+            break;
+        }
         case VPROFILE_TRACE_ADDR_TSC_PC:
         {
             vtracer_get_trace_buffer_in_reg(drcontext, instr, bb, buf, reg_ptr);
@@ -2300,6 +2337,25 @@ void vprofile_update_CI_cb(void *buf_base, void *buf_end, void* user_data)
 }
 
 #ifdef AARCH64
+void vprofile_update_CATP_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_CATP_t* cache_ptr = (cache_CATP_t*)buf_base;
+    cache_CATP_t* cache_end = (cache_CATP_t*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; ++cache_ptr) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.addr = cache_ptr->addr;
+        user_info.tsc = cache_ptr->tsc;
+        user_info.pc = cache_ptr->pc;
+        user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
 void vprofile_update_ATP_cb(void *buf_base, void *buf_end, void* user_data)
 {
     cache_ATP_t* cache_ptr = (cache_ATP_t*)buf_base;
@@ -2558,6 +2614,25 @@ void vprofile_update_CI_cb(void *buf_base, void *buf_end, void* user_data)
 }
 
 #ifdef AARCH64
+void vprofile_update_CATP_cb(void *buf_base, void *buf_end, void* user_data)
+{
+    cache_CATP_t* cache_ptr = (cache_CATP_t*)buf_base;
+    cache_CATP_t* cache_end = (cache_CATP_t*)buf_end;
+    val_info_t user_info;
+    for(; cache_ptr<cache_end; cache_ptr+=global_analysis_period) {
+        // extract data from cache
+        user_info.type = cache_ptr->opnd_info.info.opnd_type;
+        user_info.is_float = TEST_OPND_MASK(cache_ptr->opnd_info.info.opnd_type, IS_FLOATING);
+        user_info.size = cache_ptr->opnd_info.info.size;
+        user_info.esize = cache_ptr->opnd_info.info.esize;
+        user_info.addr = cache_ptr->addr;
+        user_info.tsc = cache_ptr->tsc;
+        user_info.pc = cache_ptr->pc;
+        user_info.ctxt_hndl = cache_ptr->ctxt_hndl;
+        (*((void (*)(val_info_t *)) user_data))(&user_info);
+    }
+}
+
 void vprofile_update_ATP_cb(void *buf_base, void *buf_end, void* user_data)
 {
     cache_ATP_t* cache_ptr = (cache_ATP_t*)buf_base;
@@ -2709,7 +2784,12 @@ void vprofile_register_trace_cb_impl(vtrace_buffer_t* buff,
 
     uint32_t masked_trace_flag = (trace_flag & VPROFILE_TRACE_MASK);
     bool strictly_ordered = TEST_FLAG(trace_flag, VPROFILE_TRACE_STRICTLY_ORDERED);
-
+    printf("trace_flag:%x\n", masked_trace_flag);
+    #ifdef AARCH64 
+        printf("AARCH64 mode");
+    #else 
+        printf("Not AARCH64");
+    #endif
     switch(masked_trace_flag) {
         case VPROFILE_TRACE_VAL_CCT_ADDR_INFO:
             if(strictly_ordered) {
@@ -2799,6 +2879,11 @@ void vprofile_register_trace_cb_impl(vtrace_buffer_t* buff,
                                     vprofile_fill_num_type_specialized_cb<cache_CI_t, sz, esize, is_float, trace_before_write>;
             break;
 #ifdef AARCH64
+        case VPROFILE_TRACE_CCT_ADDR_TSC_PC:
+                buff->full_cb = vprofile_update_CATP_cb;
+                buff->fill_num_cb = strictly_ordered ? vprofile_fill_num_cb<cache_CATP_t, trace_before_write> :
+                                        vprofile_fill_num_type_specialized_cb<cache_CATP_t, sz, esize, is_float, trace_before_write>;
+                break;
         case VPROFILE_TRACE_ADDR_TSC_PC:
             buff->full_cb = vprofile_update_ATP_cb;
             buff->fill_num_cb = strictly_ordered ? vprofile_fill_num_cb<cache_ATP_t, trace_before_write> :
@@ -2945,6 +3030,12 @@ int get_buf_size_impl(uint32_t trace_flag) {
             return (sizeof(cache_CA_t) * MAX_NUM_MEM_REFS);
         case VPROFILE_TRACE_CCT_INFO:
             return (sizeof(cache_CI_t) * MAX_NUM_MEM_REFS);
+#ifdef AARCH64
+        case VPROFILE_TRACE_CCT_ADDR_TSC_PC:
+            return (sizeof(cache_CATP_t) * MAX_NUM_MEM_REFS);;
+        case VPROFILE_TRACE_ADDR_TSC_PC:
+            return (sizeof(cache_ATP_t) * MAX_NUM_MEM_REFS);
+#endif
         case VPROFILE_TRACE_ADDR_INFO:
             return (sizeof(cache_AI_t) * MAX_NUM_MEM_REFS);
         case VPROFILE_TRACE_ADDR:
