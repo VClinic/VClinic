@@ -14,6 +14,8 @@ const uint32_t CACHE_LINE_SIZE = 64;       // 所有层级行大小均为64字�
 const uint32_t L1_ASSOCIATIVITY = 4;       // L1I/L1D均为4路组相联（{insert\_element\_3\_}、{insert\_element\_4\_}）
 const uint32_t L2_ASSOCIATIVITY = 4;       // L2为4路组相联（{insert\_element\_5\_}）
 // const uint32_t L3_ASSOCIATIVITY = 8;       // L3默认8路组相联（文档未明确，参考DSU通用设计）
+const uint64_t L1_INS_CNT_GATE = 10000;
+const uint8_t L1_CONFLICT_MISS_GATE = 1;
 
 // 2. MESI状态（2.6.2.5节，{insert\_element\_6\_}~{insert\_element\_7\_}）
 enum class MESIState {
@@ -29,10 +31,11 @@ struct CacheLine {
     uint64_t tag = 0;              // 物理地址的Tag部分（VIPT中L1D用物理Tag）
     ShadowPage* sp = nullptr;
     bool empty = true;
-    // MESIState state = MESIState::INVALID;  // 行状态
-    // bool is_dirty = false;         // 脏位（仅M状态为true）
-    // uint8_t data[CACHE_LINE_SIZE] = {0};  // 行数据
+    
     uint32_t lru_counter = 0;      // LRU替换算法计数器 (数越大，越久未访问)
+
+    uint64_t last_miss_ins_cnt = 0; // 上一次缺失时间（指令计数值）
+    uint8_t accu_miss_cnt = 0;      // 缺失累计（用于判断是否超过阈值）
 };
 
 // 4. 地址拆分工具（将物理地址拆分为Tag、Index、Offset，适配不同缓存大小）

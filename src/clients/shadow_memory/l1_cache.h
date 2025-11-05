@@ -31,9 +31,14 @@ private:
     std::vector<std::vector<CacheLine>> cache_sets;  // cache_sets[index][way] = CacheLine
     L2Cache* l2;
     ShadowPageTable* spt;
-    int64_t l1_load_miss_cnt;
-    int64_t l1_store_miss_cnt;
-    
+
+    uint64_t total_ins_cnt;
+
+    int64_t l1_miss_cnt;
+    int64_t l1_capacity_miss_cnt;
+    int64_t l1_conflict_miss_cnt;
+
+
     uint32_t insert_cacheline(uint64_t addr, uint64_t tag, uint32_t group_index, int32_t tid);
     
     uint32_t find_lru(uint32_t group_index);

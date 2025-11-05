@@ -35,14 +35,10 @@ private:
     // Dirty 掩码：一个 bit per cache line
     std::atomic<uint64_t> thread_dirty_bitmap[MAX_THREADS];
 
-    // Per-line version 用于无锁读一致性：写期间 version++（一次写时使版本变为奇数 -> 写结束后加1）
-    std::atomic<uint64_t> line_version[LINES_PER_PAGE];
-
     uint8_t data[LINES_PER_PAGE];
 public:
     ShadowPage() {
         for(size_t i=0; i < MAX_THREADS; i++)   thread_dirty_bitmap[i].store(0);
-        for (size_t i = 0; i < LINES_PER_PAGE; ++i) line_version[i].store(0);
         std::memset(data, 0, LINES_PER_PAGE);
     }
     

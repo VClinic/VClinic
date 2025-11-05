@@ -19,22 +19,23 @@ bool ShadowPage::is_dirty(uint64_t addr, int32_t tid) {
 }
 
 bool ShadowPage::read(uint64_t addr, int32_t tid) {
-    try{
-        size_t li = line_index_of(addr);
-        uint64_t mask = (1ULL << li);
-        uint64_t dirty = thread_dirty_bitmap[tid].fetch_and(~mask, std::memory_order_acquire);
-        return (dirty & mask) != 0;
-    }catch (const std::exception& e) { 
-        // 打印异常信息：e.what() 返回描述性字符串
-        std::cerr << "捕获到标准异常：" << e.what() << std::endl;
-    }
-    exit(0);
+    size_t li = line_index_of(addr);
+    uint64_t mask = (1ULL << li);
+    uint64_t dirty = thread_dirty_bitmap[tid].fetch_and(~mask, std::memory_order_acquire);
+    return (dirty & mask) != 0;
 }
 
 bool ShadowPage::write(uint64_t addr, int32_t tid) {
     size_t li = line_index_of(addr);
     uint64_t mask = (1ULL << li);
-    uint64_t dirty = thread_dirty_bitmap[tid].fetch_or(~mask, std::memory_order_acquire);
+    uint64_t dirty = 0;
+    for (int i = 0; i < MAX_THREADS; i++) {
+        if (i == tid) {
+            dirty = thread_dirty_bitmap[tid].load();
+        } else {
+            thread_dirty_bitmap[i].fetch_or(mask, std::memory_order_acquire);
+        }
+    }
     return (dirty & mask) != 0;
 }
 

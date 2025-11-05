@@ -13,8 +13,11 @@ L1Cache::L1Cache(uint32_t size_kb, L1Type type, L2Cache* l2, ShadowPageTable* sp
     // 初始化每组的4个路（默认均为INVALID EMPTY状态）
     cache_sets.resize(num_sets, std::vector<CacheLine>(L1_ASSOCIATIVITY));
 
-    l1_load_miss_cnt = 0;
-    l1_store_miss_cnt = 0;
+    total_ins_cnt = 0;
+
+    l1_miss_cnt = 0;
+    l1_capacity_miss_cnt = 0;
+    l1_conflict_miss_cnt = 0;
 
     printf(">>>>>>>> L1Cache Init <<<<<<<<\n");
     printf("L1Cache size %dKB\n", size_kb);
@@ -24,8 +27,10 @@ L1Cache::L1Cache(uint32_t size_kb, L1Type type, L2Cache* l2, ShadowPageTable* sp
 }
 
 L1Cache::~L1Cache(){
-    printf("L1Cache l1_load_miss_cnt %ld\n", l1_load_miss_cnt);
-    printf("L1Cache l1_store_miss_cnt %ld\n", l1_store_miss_cnt);
+    printf(">>>>>>>> L1Cache Delete <<<<<<<<\n");
+    printf("L1Cache Total l1_miss_cnt: %ld\n", l1_miss_cnt);
+    printf("L1Cache l1 capacity miss cnt: %ld\n", l1_capacity_miss_cnt);
+    printf("L1Cache l1 conflict miss cnt: %ld\n\n", l1_conflict_miss_cnt);
     
     delete l2;
     delete spt;
@@ -48,8 +53,14 @@ void L1Cache::load(uint64_t addr, int32_t tid){
     uint32_t index, offset, way;
     AddressSplitter::split(addr, cache_size, tag, index, offset);
 
+    // printf("tid %d read     addr %lu\n", tid, addr);
+    // total ins cnt ++
+    total_ins_cnt++;
+
     // find in L1
     bool in_l1 = find_cacheline(index, tag, way);
+
+    // printf("tid %d read  to addr %lu\n", tid, addr);
 
     // L1 Hit
     if(in_l1){
@@ -67,6 +78,7 @@ void L1Cache::load(uint64_t addr, int32_t tid){
             // printf("addr %lu l1 hit, try to sp->read\n", addr);
             hit_cacheline.sp->read(addr, tid);
             // printf("addr %lu l1 hit, done sp->read\n", addr);
+            // printf("LOAD HIT AND CLEAN\n\n");
             return;
         }
 
@@ -81,14 +93,16 @@ void L1Cache::load(uint64_t addr, int32_t tid){
             // printf("addr %lu l1 hit, try to sp->read\n", addr);
             hit_cacheline.sp->read(addr, tid);
             // printf("addr %lu l1 hit, done sp->read\n", addr);
-            l1_load_miss_cnt++;
+            l1_miss_cnt++;
+            printf("LOAD HIT AND DIRTY\n\n");
             return;
         }
     }
     // L1 Miss
     else{
         // l1d load miss
-        l1_load_miss_cnt++;
+        l1_miss_cnt++;
+        // printf("LOAD MISS\n\n");
         // Ask L2
         // printf("addr %lu l1 miss ask l2\n", addr);
         l2->ask_l2(addr, tid);
@@ -104,6 +118,22 @@ void L1Cache::load(uint64_t addr, int32_t tid){
         target_cacheline.sp->read(addr, tid);
         // printf("addr %lu l1 done to sp->read\n", addr);
 
+        // process Capacity MISS or Conflict MISS ...
+        if(total_ins_cnt < target_cacheline.last_miss_ins_cnt)      // in case overflow (uint64_t)
+            target_cacheline.last_miss_ins_cnt = total_ins_cnt;
+        if(total_ins_cnt - target_cacheline.last_miss_ins_cnt > L1_INS_CNT_GATE)
+            target_cacheline.accu_miss_cnt = 0;     // or can choose faded with time accu_miss_cnt--;
+        else
+            target_cacheline.accu_miss_cnt++;
+        if(target_cacheline.accu_miss_cnt > L1_CONFLICT_MISS_GATE){
+            target_cacheline.accu_miss_cnt--;   // in case overflow
+            // capacity miss
+            l1_conflict_miss_cnt++;
+        }else{
+            // conflict miss
+            l1_capacity_miss_cnt++;
+        }
+
         return;
     }
 }
@@ -112,6 +142,10 @@ void L1Cache::store(uint64_t addr, int32_t tid){
     uint64_t tag;
     uint32_t index, offset, way;
     AddressSplitter::split(addr, cache_size, tag, index, offset);
+    // printf("tid %d write to addr %lu\n", tid, addr);
+
+    // total ins cnt ++
+    total_ins_cnt++;
 
     // find in L1
     bool in_l1 = find_cacheline(index, tag, way);
@@ -138,14 +172,14 @@ void L1Cache::store(uint64_t addr, int32_t tid){
         else{
             update_lru(index, way);
             hit_cacheline.sp->write(addr, tid);
-            l1_store_miss_cnt++;
+            l1_miss_cnt++;
             return;
         }
     }
     // L1 Miss
     else{
         // l1 store miss
-        l1_store_miss_cnt++;
+        l1_miss_cnt++;
         // Ask L2
         l2->ask_l2(addr, tid);
 
@@ -155,6 +189,23 @@ void L1Cache::store(uint64_t addr, int32_t tid){
         update_lru(index, way);
         CacheLine& target_cacheline = cache_sets[index][way];
         target_cacheline.sp->write(addr, tid);
+
+        // process Capacity MISS or Conflict MISS ...
+        if(total_ins_cnt < target_cacheline.last_miss_ins_cnt)      // in case overflow (uint64_t)
+            target_cacheline.last_miss_ins_cnt = total_ins_cnt;
+        if(total_ins_cnt - target_cacheline.last_miss_ins_cnt > L1_INS_CNT_GATE)
+            target_cacheline.accu_miss_cnt = 0;     // or can choose faded with time accu_miss_cnt--;
+        else
+            target_cacheline.accu_miss_cnt++;
+        if(target_cacheline.accu_miss_cnt > L1_CONFLICT_MISS_GATE){
+            target_cacheline.accu_miss_cnt--;   // in case overflow
+            // capacity miss
+            l1_conflict_miss_cnt++;
+        }else{
+            // conflict miss
+            l1_capacity_miss_cnt++;
+        }
+
         return;
     }
 }
