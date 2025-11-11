@@ -544,23 +544,20 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_get_trace_buffer_in_reg(drcontext, instr, bb, buf, reg_ptr);
             // addr
             if(opnd_is_memory_reference(opnd)) {
-                if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
-                        DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
-                }
-                vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_CATP_t, addr));
+                vtracer_insert_trace_addr(drcontext, instr, bb, opnd, reg_ptr, reg_addr, scratch, offsetof(cache_CATP_t, addr));
             } else if(opnd_is_reg(opnd)) {
-                vtracer_insert_trace_constant(drcontext, instr, bb, (uint32_t)opnd_get_reg(opnd), reg_ptr, scratch, offsetof(cache_CATP_t, addr));
+                vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT(opnd_get_reg(opnd)), reg_ptr, scratch, offsetof(cache_CATP_t, addr));
             }
             // opnd_info
-            vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(packed_info), reg_ptr, scratch, offsetof(cache_CATP_t, opnd_info));
+            vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT(packed_info), reg_ptr, scratch, offsetof(cache_CATP_t, opnd_info));
             // CCT
             drcctlib_get_context_handle_in_reg(drcontext, bb, instr, slot, reg_addr, scratch);
             vtracer_insert_trace_val_native(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_CATP_t, ctxt_hndl));
             // TSC
             instrlist_meta_preinsert(bb, instr, INSTR_CREATE_mrs(drcontext, opnd_create_reg(reg_scratch), opnd_create_reg(DR_REG_CNTVCT_EL0)));
-            vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_scratch), reg_ptr, scratch, offsetof(cache_CATP_t, tsc));
+            vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT(opnd_get_reg(reg_scratch)), reg_ptr, scratch, offsetof(cache_CATP_t, tsc));
             // PC
-            opnd_t pc = OPND_CREATE_INT64(instr_get_app_pc(instr));
+            opnd_t pc = OPND_CREATE_INT(instr_get_app_pc(instr));
             vtracer_insert_trace_val(drcontext, instr, bb, pc, reg_ptr, scratch, offsetof(cache_CATP_t, pc));
             // update buf ptr
             vtracer_insert_trace_forward(drcontext, instr, bb, sizeof(cache_CATP_t), buf, reg_ptr, scratch);
@@ -571,20 +568,17 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_get_trace_buffer_in_reg(drcontext, instr, bb, buf, reg_ptr);
             // addr
             if(opnd_is_memory_reference(opnd)) {
-                if(!drutil_insert_get_mem_addr(drcontext, bb, instr, opnd, reg_addr/*addr*/, scratch/*scratch*/)) {
-                        DR_ASSERT_MSG(false, "InstrumentInsCallback drutil_insert_get_mem_addr failed!");
-                }
-                vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_ATP_t, addr));
+                vtracer_insert_trace_addr(drcontext, instr, bb, opnd, reg_ptr, reg_addr, scratch, offsetof(cache_ATP_t, addr));
             } else if(opnd_is_reg(opnd)) {
-                vtracer_insert_trace_constant(drcontext, instr, bb, (uint32_t)opnd_get_reg(opnd), reg_ptr, scratch, offsetof(cache_ATP_t, addr));
+                vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT(opnd_get_reg(opnd)), reg_ptr, scratch, offsetof(cache_ATP_t, addr));
             }
             // opnd_info
-            vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT32(packed_info), reg_ptr, scratch, offsetof(cache_ATP_t, opnd_info));
+            vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT(packed_info), reg_ptr, scratch, offsetof(cache_ATP_t, opnd_info));
             // TSC
             instrlist_meta_preinsert(bb, instr, INSTR_CREATE_mrs(drcontext, opnd_create_reg(reg_scratch), opnd_create_reg(DR_REG_CNTVCT_EL0)));
-            vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_scratch), reg_ptr, scratch, offsetof(cache_ATP_t, tsc));
+            vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT(opnd_get_reg(reg_scratch)), reg_ptr, scratch, offsetof(cache_ATP_t, tsc));
             // PC
-            opnd_t pc = OPND_CREATE_INT64(instr_get_app_pc(instr));
+            opnd_t pc = OPND_CREATE_INT(instr_get_app_pc(instr));
             vtracer_insert_trace_val(drcontext, instr, bb, pc, reg_ptr, scratch, offsetof(cache_ATP_t, pc));
             // update buf ptr
             vtracer_insert_trace_forward(drcontext, instr, bb, sizeof(cache_ATP_t), buf, reg_ptr, scratch);
