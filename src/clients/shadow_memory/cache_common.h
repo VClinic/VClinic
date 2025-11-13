@@ -16,13 +16,12 @@ const uint32_t L2_ASSOCIATIVITY = 4;       // L2为4路组相联（{insert\_elem
 // const uint32_t L3_ASSOCIATIVITY = 8;       // L3默认8路组相联（文档未明确，参考DSU通用设计）
 const uint64_t L1_INS_CNT_GATE = 10000;
 const uint8_t L1_CONFLICT_MISS_GATE = 1;
+const uint64_t L1_CACHE_BUMP_GATE = 200;
 
-// 2. MESI状态（2.6.2.5节，{insert\_element\_6\_}~{insert\_element\_7\_}）
-enum class MESIState {
-    INVALID,    // I：无效（{insert\_element\_8\_}）
-    SHARED,     // S：共享干净（{insert\_element\_9\_}）
-    EXCLUSIVE,  // E：独占干净（{insert\_element\_10\_}）
-    MODIFIED    // M：已修改（{insert\_element\_11\_}）
+enum class CacheMissReason {
+    COHERENCE,
+    CAPACITY,
+    CONFLICT
 };
 
 // 3. 缓存行结构（存储Tag、MESI状态、数据、脏位等核心信息）
@@ -49,5 +48,26 @@ struct AddressSplitter {
         tag = phys_addr / (CACHE_LINE_SIZE * num_sets);    // Tag = 物理地址 / (行大小×总组数)
     }
 };
+
+struct CacheBump {
+    uint64_t addr;
+    
+    uint64_t out_ins_cnt;
+    int32_t out_cct;
+    CacheMissReason out_reason;
+
+    uint64_t in_ins_cnt;
+    int32_t in_cct;
+    CacheMissReason in_reason;
+};
+
+inline std::string reason_to_string(CacheMissReason reason) {
+    switch (reason) {
+        case CacheMissReason::COHERENCE: return "一致性缺失";
+        case CacheMissReason::CAPACITY:   return "容量缺失";
+        case CacheMissReason::CONFLICT:   return "冲突缺失";
+        default: return "未知缺失";
+    }
+}
 
 #endif // CACHE_COMMON_H

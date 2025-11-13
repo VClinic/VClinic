@@ -1,6 +1,8 @@
 #ifndef L1_CACHE_H
 #define L1_CACHE_H
 
+#include <unordered_set>
+#include <string>
 #include <random>
 #include "cache_common.h"
 #include "vprofile.h"
@@ -21,8 +23,8 @@ public:
     // test
     void print_here(val_info_t *info);
     
-    void load(uint64_t addr, int32_t tid);
-    void store(uint64_t addr, int32_t tid);
+    void load(uint64_t addr, int32_t cct, int32_t tid);
+    void store(uint64_t addr, int32_t cct, int32_t tid);
     
 private:
 
@@ -37,15 +39,27 @@ private:
     int64_t l1_miss_cnt;
     int64_t l1_capacity_miss_cnt;
     int64_t l1_conflict_miss_cnt;
+    // std::unordered_map<uint64_t, int64_t> pc_l1_miss_map;
+    std::unordered_map<int32_t, int64_t> cct_coherence_miss_map;
+    std::unordered_map<int32_t, int64_t> cct_capacity_miss_map;
+    std::unordered_map<int32_t, int64_t> cct_conflict_miss_map;
 
+    std::unordered_map<uint64_t, CacheBump> cache_bump_map;
+    std::vector<CacheBump> cache_bump_list;
 
-    uint32_t insert_cacheline(uint64_t addr, uint64_t tag, uint32_t group_index, int32_t tid);
+    uint32_t insert_cacheline(uint64_t addr, uint64_t tag, uint32_t group_index, int32_t tid, uint64_t* swap_out_addr);
     
-    uint32_t find_lru(uint32_t group_index);
-    void update_lru(uint32_t group_index, uint32_t way);
+    // uint32_t find_lru(uint32_t group_index);
+    // void update_lru(uint32_t group_index, uint32_t way);
     
     int32_t find_freecacheline(uint32_t group_index, int32_t tid);
     bool find_cacheline(uint32_t index, uint64_t tag, uint32_t& way);
+
+    void print_total_info();
+    void print_miss_cnt_topk(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, std::string desc);
+    void print_cache_bump(int topk);
+
+    void clean_steal_cache_bump_map();
 };
 
 #endif // L1_CACHE_H

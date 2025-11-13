@@ -120,36 +120,18 @@ VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
     return ((user_mask & opmask) == opmask);
 }
 
-enum zzz {
-    Z_MEMORY=0x20,
-    Z_READ=0x100,
-    Z_WRITE=0x200,
-
-    Z_BEFORE=0x1000,
-    Z_AFTER=0x2000,
-
-    Z_GPR_REGISTER=0x1,
-    Z_SIMD_REGISTER=0x2,
-    Z_CTR_REGISTER=0x4,
-    Z_OTH_REGISTER=0x8,
-
-    Z_REGISTER=(Z_GPR_REGISTER|Z_SIMD_REGISTER|Z_CTR_REGISTER|Z_OTH_REGISTER),
-
-    Z_MEMORY_READ=(Z_MEMORY|Z_READ|Z_BEFORE),
-    Z_MEMORY_WRITE=(Z_MEMORY|Z_WRITE|Z_AFTER),
-    Z_MEMORY_BEFORE_WRITE=(Z_REGISTER|Z_WRITE|Z_BEFORE)
-};
-
 void ins_handler(L1Cache* l1d, val_info_t *info, per_thread_t* pt){
     int32_t tid = pt->threadId;
     
     if ((info->type) & (vprofile_src_t::MEMORY)){
-        //printf("addr %lu, type %u, ctxt_hndl %d, tsc %lu, pc %lu\n", info->addr, info->type, info->ctxt_hndl, info->tsc, info->pc);
+        // printf("addr %lu, type %u, ctxt_hndl %d, tsc %lu, pc %lu\n", info->addr, info->type, info->ctxt_hndl, info->tsc, info->pc);
+        // drcctlib_print_backtrace(pt->output_file, info->ctxt_hndl, false, true, 50 /*MAX_CCT_DEPTH*/);
         if(((info->type) & (vprofile_src_t::READ)) && ((info->type) & (vprofile_src_t::BEFORE))){
-            l1d->load(info->addr, tid);
+            l1d->load(info->addr, info->ctxt_hndl, tid);
+            // drcctlib_print_backtrace(pt->output_file, info->ctxt_hndl, false, true, 50 /*MAX_CCT_DEPTH*/);
             // printf("read  addr %lu, type %u, ctxt_hndl %d, tsc %lu, pc %lu\n", info->addr, info->type, info->ctxt_hndl, info->tsc, info->pc);
         }else if(((info->type) & (vprofile_src_t::WRITE)) && ((info->type) & (vprofile_src_t::BEFORE))){
-            l1d->store(info->addr, tid);
+            l1d->store(info->addr, info->ctxt_hndl, tid);
             // printf("write addr %lu, type %u, ctxt_hndl %d, tsc %lu, pc %lu\n", info->addr, info->type, info->ctxt_hndl, info->tsc, info->pc);
         }else{
             // printf("not memory read and nor memory before write\n");

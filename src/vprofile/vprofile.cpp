@@ -555,7 +555,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_insert_trace_val_native(drcontext, instr, bb, opnd_create_reg(reg_addr), reg_ptr, scratch, offsetof(cache_CATP_t, ctxt_hndl));
             // TSC
             instrlist_meta_preinsert(bb, instr, INSTR_CREATE_mrs(drcontext, opnd_create_reg(reg_scratch), opnd_create_reg(DR_REG_CNTVCT_EL0)));
-            vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT(opnd_get_reg(reg_scratch)), reg_ptr, scratch, offsetof(cache_CATP_t, tsc));
+            vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_scratch), reg_ptr, scratch, offsetof(cache_CATP_t, tsc));
             // PC
             opnd_t pc = OPND_CREATE_INT(instr_get_app_pc(instr));
             vtracer_insert_trace_val(drcontext, instr, bb, pc, reg_ptr, scratch, offsetof(cache_CATP_t, pc));
@@ -576,7 +576,7 @@ inline __attribute__((always_inline)) void insertStoreTraceBuffer(void *drcontex
             vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT(packed_info), reg_ptr, scratch, offsetof(cache_ATP_t, opnd_info));
             // TSC
             instrlist_meta_preinsert(bb, instr, INSTR_CREATE_mrs(drcontext, opnd_create_reg(reg_scratch), opnd_create_reg(DR_REG_CNTVCT_EL0)));
-            vtracer_insert_trace_val(drcontext, instr, bb, OPND_CREATE_INT(opnd_get_reg(reg_scratch)), reg_ptr, scratch, offsetof(cache_ATP_t, tsc));
+            vtracer_insert_trace_val(drcontext, instr, bb, opnd_create_reg(reg_scratch), reg_ptr, scratch, offsetof(cache_ATP_t, tsc));
             // PC
             opnd_t pc = OPND_CREATE_INT(instr_get_app_pc(instr));
             vtracer_insert_trace_val(drcontext, instr, bb, pc, reg_ptr, scratch, offsetof(cache_ATP_t, pc));
