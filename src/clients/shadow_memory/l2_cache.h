@@ -11,6 +11,8 @@ class L2Cache {
 
         void ask_l2(uint64_t addr, int32_t tid);
         void evicted_from_l1(uint64_t addr, int32_t tid);        
+
+        void invalid_cacheline(uint64_t addr);
     
     private:
         uint32_t cache_size;

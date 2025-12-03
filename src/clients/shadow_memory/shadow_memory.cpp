@@ -26,6 +26,7 @@
 #define WINDOW_DISABLE 100000000
 // #define WINDOW_CLEAN 10
 
+ShadowPageTable* spt = new ShadowPageTable();
 int win_enable;
 int win_disable;
 static droption_t<bool> op_enable_sampling
@@ -91,6 +92,7 @@ typedef struct _per_thread_t {
 
     // L1 Data Cache
     L1Cache* l1d;
+    long long memory_ins_cnt;
 } per_thread_t;
 
 file_t gFlagF;
@@ -122,15 +124,19 @@ VPROFILE_FILTER_OPND(opnd_t opnd, vprofile_src_t opmask) {
 
 void ins_handler(L1Cache* l1d, val_info_t *info, per_thread_t* pt){
     int32_t tid = pt->threadId;
+    // static bool flag = true;
     
     if ((info->type) & (vprofile_src_t::MEMORY)){
         // printf("addr %lu, type %u, ctxt_hndl %d, tsc %lu, pc %lu\n", info->addr, info->type, info->ctxt_hndl, info->tsc, info->pc);
         // drcctlib_print_backtrace(pt->output_file, info->ctxt_hndl, false, true, 50 /*MAX_CCT_DEPTH*/);
         if(((info->type) & (vprofile_src_t::READ)) && ((info->type) & (vprofile_src_t::BEFORE))){
+            pt->memory_ins_cnt++;
             l1d->load(info->addr, info->ctxt_hndl, tid);
             // drcctlib_print_backtrace(pt->output_file, info->ctxt_hndl, false, true, 50 /*MAX_CCT_DEPTH*/);
             // printf("read  addr %lu, type %u, ctxt_hndl %d, tsc %lu, pc %lu\n", info->addr, info->type, info->ctxt_hndl, info->tsc, info->pc);
         }else if(((info->type) & (vprofile_src_t::WRITE)) && ((info->type) & (vprofile_src_t::BEFORE))){
+            pt->memory_ins_cnt++;
+            // drcctlib_print_backtrace(pt->output_file, info->ctxt_hndl, false, true, 50 /*MAX_CCT_DEPTH*/);
             l1d->store(info->addr, info->ctxt_hndl, tid);
             // printf("write addr %lu, type %u, ctxt_hndl %d, tsc %lu, pc %lu\n", info->addr, info->type, info->ctxt_hndl, info->tsc, info->pc);
         }else{
@@ -196,19 +202,22 @@ ClientThreadStart(void *drcontext)
     // init output files
     ThreadOutputFileInit(pt, drcontext);
 
-    ShadowPageTable* spt = new ShadowPageTable();
+    // ShadowPageTable* spt = new ShadowPageTable();
+    pt->memory_ins_cnt=0;
     L2Cache* l2 = new L2Cache(L2_CACHE_SIZE, spt);
-    pt->l1d = new L1Cache(L1_CACHE_SIZE, L1Type::DATA, l2, spt);
+    pt->l1d = new L1Cache(L1_CACHE_SIZE, L1Type::DATA, l2, spt, pt->output_file);
 }
 
 static void
 ClientThreadEnd(void *drcontext)
 {
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    pt->l1d->print_result();
     dr_close_file(pt->output_file);
     for(size_t i=0;i<pt->instr_clones->size();++i) {
         instr_destroy(drcontext, (*pt->instr_clones)[i]);
     }
+    printf("\n\ntotal memory cnt %lld\n\n", pt->memory_ins_cnt);
     delete pt->instr_clones;
     delete pt->INTRedLogMap;
     delete pt->FPRedLogMap;

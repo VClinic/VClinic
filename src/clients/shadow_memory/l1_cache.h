@@ -17,7 +17,7 @@ enum class L1Type {
 class L1Cache {
 public:
     // 构造函数：输入缓存大小（16KB/32KB/64KB）、L2引用、L1类型
-    L1Cache(uint32_t size_kb, L1Type type, L2Cache* l2, ShadowPageTable* spt);
+    L1Cache(uint32_t size_kb, L1Type type, L2Cache* l2, ShadowPageTable* spt, file_t);
     ~L1Cache();
 
     // test
@@ -25,6 +25,8 @@ public:
     
     void load(uint64_t addr, int32_t cct, int32_t tid);
     void store(uint64_t addr, int32_t cct, int32_t tid);
+
+    void print_result();
     
 private:
 
@@ -37,6 +39,8 @@ private:
     uint64_t total_ins_cnt;
 
     int64_t l1_miss_cnt;
+    int64_t l1_load_miss_cnt;
+    int64_t l1_coherence_miss_cnt;
     int64_t l1_capacity_miss_cnt;
     int64_t l1_conflict_miss_cnt;
     // std::unordered_map<uint64_t, int64_t> pc_l1_miss_map;
@@ -47,6 +51,9 @@ private:
     std::unordered_map<uint64_t, CacheBump> cache_bump_map;
     std::vector<CacheBump> cache_bump_list;
 
+    // output result file_t
+    file_t output_file;
+
     uint32_t insert_cacheline(uint64_t addr, uint64_t tag, uint32_t group_index, int32_t tid, uint64_t* swap_out_addr);
     
     // uint32_t find_lru(uint32_t group_index);
@@ -56,7 +63,7 @@ private:
     bool find_cacheline(uint32_t index, uint64_t tag, uint32_t& way);
 
     void print_total_info();
-    void print_miss_cnt_topk(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, std::string desc);
+    void print_miss_cnt_topk(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, CacheMissReason cache_reason);
     void print_cache_bump(int topk);
 
     void clean_steal_cache_bump_map();

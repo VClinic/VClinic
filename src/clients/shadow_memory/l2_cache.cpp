@@ -59,6 +59,9 @@ void L2Cache::evicted_from_l1(uint64_t addr, int32_t tid){
     uint32_t index, offset, way;
     AddressSplitter::split(addr, cache_size, tag, index, offset);
     // assert l2 do not have addr (data cache)
+    if(find_cacheline(index, tag, way) == true){
+        printf("addr1 %lu addr2 %lu\n", addr, cache_sets[index][way].addr);
+    }
     assert(find_cacheline(index, tag, way) == false);
 
     int32_t free_cacheline = find_freecacheline(index, tid);
@@ -67,8 +70,8 @@ void L2Cache::evicted_from_l1(uint64_t addr, int32_t tid){
 
     // L2 has free cache line
     if(free_cacheline >= 0){
-        target_cacheline = &(cache_sets[index][way]);
         way = (uint32_t)free_cacheline;
+        target_cacheline = &(cache_sets[index][way]);
     }
     // L2 has NO free cache line
     else{
@@ -141,4 +144,13 @@ bool L2Cache::find_cacheline(uint32_t index, uint64_t tag, uint32_t& way){
         }
     }
     return false;
+}
+
+void L2Cache::invalid_cacheline(uint64_t addr){
+    uint64_t tag;
+    uint32_t index, offset, way;
+    AddressSplitter::split(addr, cache_size, tag, index, offset);
+    if(find_cacheline(index, tag, way) == true){
+        cache_sets[index][tag].empty = true;
+    }
 }
