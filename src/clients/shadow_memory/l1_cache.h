@@ -23,7 +23,7 @@ public:
     // test
     void print_here(val_info_t *info);
     
-    void load(uint64_t addr, int32_t cct, int32_t tid);
+    void load(uint64_t addr, int32_t cct, int32_t read_bytes, int32_t tid);
     void store(uint64_t addr, int32_t cct, int32_t tid);
 
     void print_result();
@@ -43,6 +43,9 @@ private:
     int64_t l1_coherence_miss_cnt;
     int64_t l1_capacity_miss_cnt;
     int64_t l1_conflict_miss_cnt;
+    int64_t l1_prefetch_miss_cnt;
+    uint64_t prev_addr;
+    int32_t diff;
     // std::unordered_map<uint64_t, int64_t> pc_l1_miss_map;
     std::unordered_map<int32_t, int64_t> cct_coherence_miss_map;
     std::unordered_map<int32_t, int64_t> cct_capacity_miss_map;

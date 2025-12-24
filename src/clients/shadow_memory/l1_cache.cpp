@@ -24,6 +24,10 @@ L1Cache::L1Cache(uint32_t size_kb, L1Type type, L2Cache* l2, ShadowPageTable* sp
     l1_capacity_miss_cnt = 0;
     l1_conflict_miss_cnt = 0;
 
+    prev_addr = 0;
+    diff = 0;
+    l1_prefetch_miss_cnt = 0;
+
     printf(">>>>>>>> L1Cache Init <<<<<<<<\n");
     printf("L1Cache size %dKB\n", size_kb);
     printf("L1Cache cacheline size %dB\n", CACHE_LINE_SIZE);
@@ -50,10 +54,11 @@ void L1Cache::print_here(val_info_t *info){
     }
 }
 
-void L1Cache::load(uint64_t addr, int32_t cct, int32_t tid){
+void L1Cache::load(uint64_t addr, int32_t cct, int32_t read_bytes, int32_t tid){
     uint64_t tag;
     uint32_t index, offset, way;
     AddressSplitter::split(addr, cache_size, tag, index, offset);
+    // dr_fprintf(output_file, "read addr %lu read bytes %d B\n", addr, read_bytes);
 
     // printf("tid %d read     addr %lu\n", tid, addr);
     // total ins cnt ++
@@ -108,6 +113,14 @@ void L1Cache::load(uint64_t addr, int32_t cct, int32_t tid){
         // l1d load miss
         l1_miss_cnt++;
         l1_load_miss_cnt++;
+        // dr_fprintf(output_file, "X read miss addr %lu read bytes %d B\n", addr, read_bytes);
+        int32_t cur_diff = addr > prev_addr ? (addr - prev_addr) : -(prev_addr - addr);
+        prev_addr = addr;
+        if (diff == cur_diff){
+            l1_prefetch_miss_cnt++;
+        }else{
+            diff = cur_diff;
+        }
         // printf("LOAD MISS\n\n");
         // Ask L2
         // printf("addr %lu l1 miss ask l2\n", addr);
@@ -176,6 +189,7 @@ void L1Cache::store(uint64_t addr, int32_t cct, int32_t tid){
     uint32_t index, offset, way;
     AddressSplitter::split(addr, cache_size, tag, index, offset);
     // printf("tid %d write at %u %u addr %lu\n", tid, index, way, addr);
+    // printf("write at group %u offset %u\n", index, offset);
 
     // total ins cnt ++
     total_ins_cnt++;
@@ -391,12 +405,14 @@ void L1Cache::print_total_info(){
     printf("L1Cache coherence miss cnt: %ld\n", l1_coherence_miss_cnt);
     printf("L1Cache capacity miss cnt: %ld\n", l1_capacity_miss_cnt);
     printf("L1Cache conflict miss cnt: %ld\n\n", l1_conflict_miss_cnt);
+    printf("L1Cache prefetch miss cnt: %ld\n\n", l1_prefetch_miss_cnt);
 
     dr_fprintf(output_file, "L1Cache Total l1_miss_cnt: %ld\n", l1_miss_cnt);
     dr_fprintf(output_file, "L1Cache Total l1_load_miss_cnt: %ld\n", l1_load_miss_cnt);
     dr_fprintf(output_file, "L1Cache coherence miss cnt: %ld\n", l1_coherence_miss_cnt);
     dr_fprintf(output_file, "L1Cache capacity miss cnt: %ld\n", l1_capacity_miss_cnt);
     dr_fprintf(output_file, "L1Cache conflict miss cnt: %ld\n\n", l1_conflict_miss_cnt);
+    dr_fprintf(output_file, "L1Cache prefetch miss cnt: %ld\n\n", l1_prefetch_miss_cnt);
 
     std::unordered_map<uint64_t, int> addr_count;
     for (const auto& bump : cache_bump_list) {
