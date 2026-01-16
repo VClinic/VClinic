@@ -4,11 +4,10 @@
 #include <unordered_set>
 #include <string>
 #include <random>
-#include <deque>
-
 #include "cache_common.h"
 #include "vprofile.h"
 #include "l2_cache.h"  // 依赖L2，处理缺失时的请求转发
+#include "drcctlib.h"
 
 // L1类型枚举（区分I/D缓存）
 enum class L1Type {
@@ -18,7 +17,6 @@ enum class L1Type {
 
 class L1Cache {
 public:
-    bool print_flag;
     // 构造函数：输入缓存大小（16KB/32KB/64KB）、L2引用、L1类型
     L1Cache(uint32_t size_kb, L1Type type, L2Cache* l2, ShadowPageTable* spt, file_t);
     ~L1Cache();
@@ -26,8 +24,8 @@ public:
     // test
     void print_here(val_info_t *info);
     
-    void load(uint64_t addr, int32_t cct, int32_t read_bytes, int32_t tid);
-    void store(uint64_t addr, int32_t cct, int32_t write_bytes, int32_t tid);
+    void load(uint64_t addr, data_handle_t dobj, int32_t read_bytes, int32_t tid);
+    void store(uint64_t addr, data_handle_t dobj, int32_t tid);
 
     void print_result();
     
@@ -43,21 +41,29 @@ private:
 
     int64_t l1_miss_cnt;
     int64_t l1_load_miss_cnt;
-    int64_t l1_store_miss_cnt;
     int64_t l1_coherence_miss_cnt;
     int64_t l1_capacity_miss_cnt;
     int64_t l1_conflict_miss_cnt;
-    
+    int64_t l1_prefetch_miss_cnt;
+    uint64_t prev_addr;
+    int32_t diff;
     // std::unordered_map<uint64_t, int64_t> pc_l1_miss_map;
     std::unordered_map<int32_t, int64_t> cct_coherence_miss_map;
     std::unordered_map<int32_t, int64_t> cct_capacity_miss_map;
     std::unordered_map<int32_t, int64_t> cct_conflict_miss_map;
 
+    std::unordered_map<std::string, int64_t> dobj_coherence_miss_map;
+    std::unordered_map<std::string, int64_t> dobj_capacity_miss_map;
+    std::unordered_map<std::string, int64_t> dobj_conflict_miss_map;
+    
+
     std::unordered_map<uint64_t, CacheBump> cache_bump_map;
     std::vector<CacheBump> cache_bump_list;
 
-    std::deque<uint64_t> prefetch_prefix_deque;
-    std::unordered_set<uint64_t> prefetch_prefix_set;
+    int addr_size;
+    std::vector<uint64_t> least_addr_list;
+    std::vector<int32_t> least_size_list;
+
     // output result file_t
     file_t output_file;
 
@@ -69,12 +75,9 @@ private:
     int32_t find_freecacheline(uint32_t group_index, int32_t tid);
     bool find_cacheline(uint32_t index, uint64_t tag, uint32_t& way);
 
-    // prefetch 
-    bool check_prefetch(uint64_t new_addr);
-
     void print_total_info();
-    void print_miss_cnt_topk(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, CacheMissReason cache_reason);
-    void print_cache_bump(int topk, int num_print_event);
+    void print_miss_cnt_topk(int topk, std::unordered_map<std::string, int64_t>& cct_miss_map, CacheMissReason cache_reason);
+    // void print_cache_bump(int topk);
 
     void clean_steal_cache_bump_map();
 };

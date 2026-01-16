@@ -1,16 +1,78 @@
 #include <algorithm>
 #include <iostream>
+#include <sstream>
+#include <stdexcept>
 
 #include "l1_cache.h"
 #include "l2_cache.h"
 #include "vprofile.h"
 #include "cache_common.h"
 #include "page_table.h"
+
+#include "drcctlib.h"
 // /root/VClinic-sample/build/bin64/drrun -t vprofile_memory -- is.A.x
+
+// ========== 核心函数1：data_handle_t 转 唯一字符串（序列化） ==========
+std::string dobj_to_string(const data_handle_t& h) {
+    std::ostringstream oss;
+    // 拼接规则：object_type_核心值_beg_addr_end_addr（用下划线分隔）
+    oss << (int)h.object_type << "_"; // uint8_t转int避免ASCII乱码
+    
+    // 根据object_type拼接union里的成员
+    oss << h.sym_name;
+
+#ifdef DRCCLIB_USE_ADDR
+    // 指针转成无符号64位整数再拼接（指针直接转字符串会是乱码）
+    oss << "_" << (uint64_t)h.beg_addr << "_" << (uint64_t)h.end_addr;
+#endif
+    return oss.str();
+}
+
+// ========== 核心函数2：字符串 转 data_handle_t（反序列化） ==========
+bool string_to_dobj(const std::string& str, data_handle_t& out_handle) {
+    std::vector<std::string> parts; // 存储拆分后的字段
+    std::stringstream ss(str);
+    std::string part;
+
+    // 按下划线拆分字符串
+    while (std::getline(ss, part, '_')) {
+        parts.push_back(part);
+    }
+
+    // 校验字段数量（避免解析错误）
+    int expected_parts = 2; // 基础：object_type + 核心值
+#ifdef DRCCLIB_USE_ADDR
+    expected_parts += 2;    // 启用地址后：+ beg_addr + end_addr
+#endif
+    if ((int)(parts.size()) != expected_parts) {
+        std::cerr << "字符串格式错误，字段数量不符：" << str << std::endl;
+        return false;
+    }
+
+    try {
+        // 解析第一个字段：object_type（转uint8_t）
+        out_handle.object_type = (uint8_t)std::stoi(parts[0]);
+
+        // 解析第二个字段：核心值（path_handle/sym_name）
+        out_handle.sym_name = (int32_t)std::stoi(parts[1]);
+
+#ifdef DRCCLIB_USE_ADDR
+        // 解析第三、四个字段：beg_addr/end_addr（转指针）
+        uint64_t beg_addr_uint = std::stoull(parts[2]);
+        uint64_t end_addr_uint = std::stoull(parts[3]);
+        out_handle.beg_addr = reinterpret_cast<void*>(beg_addr_uint);
+        out_handle.end_addr = reinterpret_cast<void*>(end_addr_uint);
+#endif
+    } catch (const std::exception& e) {
+        std::cerr << "解析失败：" << e.what() << "，字符串：" << str << std::endl;
+        return false;
+    }
+
+    return true;
+}
 
 L1Cache::L1Cache(uint32_t size_kb, L1Type type, L2Cache* l2, ShadowPageTable* spt, file_t output_file) 
     : cache_size(size_kb * 1024), l1_type(type), l2(l2), spt(spt), output_file(output_file) {
-    print_flag = false;
     // 计算总组数：容量/(行大小×路数)
     uint32_t num_sets = cache_size / (CACHE_LINE_SIZE * L1_ASSOCIATIVITY);
     
@@ -21,10 +83,13 @@ L1Cache::L1Cache(uint32_t size_kb, L1Type type, L2Cache* l2, ShadowPageTable* sp
 
     l1_miss_cnt = 0;
     l1_load_miss_cnt = 0;
-    l1_store_miss_cnt = 0;
     l1_coherence_miss_cnt = 0;
     l1_capacity_miss_cnt = 0;
     l1_conflict_miss_cnt = 0;
+
+    prev_addr = 0;
+    diff = 0;
+    l1_prefetch_miss_cnt = 0;
 
     printf(">>>>>>>> L1Cache Init <<<<<<<<\n");
     printf("L1Cache size %dKB\n", size_kb);
@@ -52,37 +117,11 @@ void L1Cache::print_here(val_info_t *info){
     }
 }
 
-bool cct_catch(int32_t cct){
-    // srad 272 line 
-    // return (cct == 25541) || (cct == 25538) || (cct == 25542) || (cct == 25545) || (cct == 25543);
-    // srad 205 line
-    // return (cct == 25369);
-    // srad 243 line
-    // return (cct == 25458);
-    // is
-    // return (cct == 25454) || (cct == 25455) || (cct == 25456) || (cct == 25460);
-    return false;
-}
-
-void L1Cache::load(uint64_t addr, int32_t cct, int32_t read_bytes, int32_t tid){
+void L1Cache::load(uint64_t addr, data_handle_t dobj, int32_t read_bytes, int32_t tid){
     uint64_t tag;
     uint32_t index, offset, way;
     AddressSplitter::split(addr, cache_size, tag, index, offset);
-    // dr_fprintf(output_file, "read addr %lu read bytes %d B\n", addr, read_bytes);
-    // printf("read addr %lu read bytes %d B\n", addr, read_bytes);
-    // need multi cacheline split ?
-    if(offset + read_bytes > L1_CACHE_SIZE){
-        // printf("need multi cacheline split addr %lu read_bytes %d offset %u\n", addr, read_bytes, offset); fflush(NULL);
-        load(addr + (L1_CACHE_SIZE - offset), cct, read_bytes - (L1_CACHE_SIZE - offset), tid);
-    }
-
-    // prefetch
-    bool prefetched = check_prefetch(addr);
-
-    if(cct_catch(cct) || print_flag){
-        print_flag = true;
-        dr_fprintf(output_file, "read addr %lu read bytes %d B\n", addr, read_bytes);
-    }
+    // dr_fprintf(output_file, "read addr %lu read bytes %d B\n", addr, read_bytes);        
 
     // printf("tid %d read     addr %lu\n", tid, addr);
     // total ins cnt ++
@@ -124,15 +163,11 @@ void L1Cache::load(uint64_t addr, int32_t cct, int32_t read_bytes, int32_t tid){
             // printf("addr %lu l1 hit, try to sp->read\n", addr);
             hit_cacheline.sp->read(addr, tid);
             // printf("addr %lu l1 hit, done sp->read\n", addr);
-            if(!prefetched){
-                if(cct_catch(cct)){
-                    dr_fprintf(output_file, "cct %d X read dirty addr %lu read bytes %d B\n", cct, addr, read_bytes);
-                }
-                l1_miss_cnt++;
-                l1_load_miss_cnt++;
-                l1_coherence_miss_cnt++;
-                cct_coherence_miss_map[cct]++;
-            }
+            l1_miss_cnt++;
+            l1_load_miss_cnt++;
+            l1_coherence_miss_cnt++;
+            std::string dobj_str = dobj_to_string(dobj);
+            dobj_coherence_miss_map[dobj_str]++;
             // printf("LOAD HIT AND DIRTY\n\n");
             return;
         }
@@ -140,15 +175,15 @@ void L1Cache::load(uint64_t addr, int32_t cct, int32_t read_bytes, int32_t tid){
     // L1 Miss
     else{
         // l1d load miss
-        if(!prefetched){
-            l1_miss_cnt++;
-            l1_load_miss_cnt++;
-        }
+        l1_miss_cnt++;
+        l1_load_miss_cnt++;
         // dr_fprintf(output_file, "X read miss addr %lu read bytes %d B\n", addr, read_bytes);
-        if(!prefetched){
-            if(cct_catch(cct)){
-                dr_fprintf(output_file, "cct %d X read miss addr %lu read bytes %d B\n", cct, addr, read_bytes);
-            }
+        int32_t cur_diff = addr > prev_addr ? (addr - prev_addr) : -(prev_addr - addr);
+        prev_addr = addr;
+        if (diff == cur_diff){
+            l1_prefetch_miss_cnt++;
+        }else{
+            diff = cur_diff;
         }
 
         // printf("LOAD MISS\n\n");
@@ -165,68 +200,65 @@ void L1Cache::load(uint64_t addr, int32_t cct, int32_t read_bytes, int32_t tid){
         target_cacheline.sp->read(addr, tid);
 
         // process Capacity MISS or Conflict MISS ...
-        if(!prefetched){
-            if(total_ins_cnt < target_cacheline.last_miss_ins_cnt)      // in case overflow (uint64_t)
-                target_cacheline.last_miss_ins_cnt = total_ins_cnt;
-            if(total_ins_cnt - target_cacheline.last_miss_ins_cnt > L1_INS_CNT_GATE)
-                target_cacheline.accu_miss_cnt = 0;     // or can choose faded with time accu_miss_cnt--;
-            else
-                target_cacheline.accu_miss_cnt++;
-            if(target_cacheline.accu_miss_cnt > L1_CONFLICT_MISS_GATE){
-                target_cacheline.accu_miss_cnt--;   // in case overflow
-                // conflict miss
-                l1_conflict_miss_cnt++;
-                cct_conflict_miss_map[cct]++;
-                // swap out cb
-                CacheBump cb;
-                cb.addr = swap_out_addr; cb.out_ins_cnt = total_ins_cnt; cb.out_cct = cct; cb.out_reason = CacheMissReason::CONFLICT;
-                cache_bump_map[swap_out_addr] = cb;
-                // swap in cb
-                if(cache_bump_map.find(addr) != cache_bump_map.end()){
-                    if(total_ins_cnt - cache_bump_map[addr].out_ins_cnt < L1_CACHE_BUMP_GATE){
-                        CacheBump& cb_swap_in = cache_bump_map[addr];
-                        cb_swap_in.in_ins_cnt = total_ins_cnt; cb_swap_in.in_cct = cct; cb_swap_in.in_reason = CacheMissReason::CONFLICT;
-                        cache_bump_list.push_back(cache_bump_map[addr]);
-                        cache_bump_map.erase(addr);
-                    }else
-                        cache_bump_map.erase(addr);
-                }
-            }else{
-                // capacity miss
-                l1_capacity_miss_cnt++;
-                cct_capacity_miss_map[cct]++;
-                // swap out cb
-                CacheBump cb;
-                cb.addr = swap_out_addr; cb.out_ins_cnt = total_ins_cnt; cb.out_cct = cct; cb.out_reason = CacheMissReason::CAPACITY;
-                cache_bump_map[swap_out_addr] = cb;
-                // swap in cb
-                if(cache_bump_map.find(addr) != cache_bump_map.end()){
-                    if(total_ins_cnt - cache_bump_map[addr].out_ins_cnt < L1_CACHE_BUMP_GATE){
-                        CacheBump& cb_swap_in = cache_bump_map[addr];
-                        cb_swap_in.in_ins_cnt = total_ins_cnt; cb_swap_in.in_cct = cct; cb_swap_in.in_reason = CacheMissReason::CAPACITY;
-                        cache_bump_list.push_back(cache_bump_map[addr]);
-                        cache_bump_map.erase(addr);
-                    }else
-                        cache_bump_map.erase(addr);
-                }
+        if(total_ins_cnt < target_cacheline.last_miss_ins_cnt)      // in case overflow (uint64_t)
+            target_cacheline.last_miss_ins_cnt = total_ins_cnt;
+        if(total_ins_cnt - target_cacheline.last_miss_ins_cnt > L1_INS_CNT_GATE)
+            target_cacheline.accu_miss_cnt = 0;     // or can choose faded with time accu_miss_cnt--;
+        else
+            target_cacheline.accu_miss_cnt++;
+
+        // printf("2 before dobj_to_string\n");
+        std::string dobj_str = dobj_to_string(dobj);
+        // printf("2 after dobj_to_string\n");
+        if(target_cacheline.accu_miss_cnt > L1_CONFLICT_MISS_GATE){
+            target_cacheline.accu_miss_cnt--;   // in case overflow
+            // conflict miss
+            l1_conflict_miss_cnt++;
+            dobj_conflict_miss_map[dobj_str]++;
+            // swap out cb
+            CacheBump cb;
+            cb.addr = swap_out_addr; cb.out_ins_cnt = total_ins_cnt; cb.out_dobj_str = dobj_str; cb.out_reason = CacheMissReason::CONFLICT;
+            cache_bump_map[swap_out_addr] = cb;
+            // swap in cb
+            if(cache_bump_map.find(addr) != cache_bump_map.end()){
+                if(total_ins_cnt - cache_bump_map[addr].out_ins_cnt < L1_CACHE_BUMP_GATE){
+                    CacheBump& cb_swap_in = cache_bump_map[addr];
+                    cb_swap_in.in_ins_cnt = total_ins_cnt; cb_swap_in.in_dobj_str = dobj_str; cb_swap_in.in_reason = CacheMissReason::CONFLICT;
+                    cache_bump_list.push_back(cache_bump_map[addr]);
+                    cache_bump_map.erase(addr);
+                }else
+                    cache_bump_map.erase(addr);
             }
-            clean_steal_cache_bump_map();
+        }else{
+            // capacity miss
+            l1_capacity_miss_cnt++;
+            dobj_capacity_miss_map[dobj_str]++;
+            // swap out cb
+            CacheBump cb;
+            cb.addr = swap_out_addr; cb.out_ins_cnt = total_ins_cnt; cb.out_dobj_str = dobj_str; cb.out_reason = CacheMissReason::CAPACITY;
+            cache_bump_map[swap_out_addr] = cb;
+            // swap in cb
+            if(cache_bump_map.find(addr) != cache_bump_map.end()){
+                if(total_ins_cnt - cache_bump_map[addr].out_ins_cnt < L1_CACHE_BUMP_GATE){
+                    CacheBump& cb_swap_in = cache_bump_map[addr];
+                    cb_swap_in.in_ins_cnt = total_ins_cnt; cb_swap_in.in_dobj_str = dobj_str; cb_swap_in.in_reason = CacheMissReason::CAPACITY;
+                    cache_bump_list.push_back(cache_bump_map[addr]);
+                    cache_bump_map.erase(addr);
+                }else
+                    cache_bump_map.erase(addr);
+            }
         }
+        clean_steal_cache_bump_map();
         return;
     }
 }
 
-void L1Cache::store(uint64_t addr, int32_t cct, int32_t write_bytes, int32_t tid){
+void L1Cache::store(uint64_t addr, data_handle_t dobj, int32_t tid){
     uint64_t tag;
     uint32_t index, offset, way;
     AddressSplitter::split(addr, cache_size, tag, index, offset);
     // printf("tid %d write at %u %u addr %lu\n", tid, index, way, addr);
     // printf("write at group %u offset %u\n", index, offset);
-
-    if(cct_catch(cct) || print_flag){
-        print_flag = true;
-        dr_fprintf(output_file, "write addr %lu write bytes %d B\n", addr, write_bytes);
-    }
 
     // total ins cnt ++
     total_ins_cnt++;
@@ -257,9 +289,9 @@ void L1Cache::store(uint64_t addr, int32_t cct, int32_t write_bytes, int32_t tid
             // update_lru(index, way);
             hit_cacheline.sp->write(addr, tid);
             l1_miss_cnt++;
-            l1_store_miss_cnt++;
             l1_coherence_miss_cnt++;
-            cct_coherence_miss_map[cct]++;
+            std::string dobj_str = dobj_to_string(dobj);
+            dobj_coherence_miss_map[dobj_str]++;
             // printf("HIT AND DIRTY\n");
             return;
         }
@@ -268,10 +300,6 @@ void L1Cache::store(uint64_t addr, int32_t cct, int32_t write_bytes, int32_t tid
     else{
         // l1 store miss
         l1_miss_cnt++;
-        l1_store_miss_cnt++;
-        if(cct_catch(cct)){
-            dr_fprintf(output_file, "cct %d X write miss addr %lu write bytes %d B\n", cct, addr, write_bytes);
-        }
         // Ask L2
         // l2->ask_l2(addr, tid);
 
@@ -290,20 +318,22 @@ void L1Cache::store(uint64_t addr, int32_t cct, int32_t write_bytes, int32_t tid
             target_cacheline.accu_miss_cnt = 0;     // or can choose faded with time accu_miss_cnt--;
         else
             target_cacheline.accu_miss_cnt++;
+
+        std::string dobj_str = dobj_to_string(dobj);
         if(target_cacheline.accu_miss_cnt > L1_CONFLICT_MISS_GATE){
             target_cacheline.accu_miss_cnt--;   // in case overflow
             // conflict miss
             l1_conflict_miss_cnt++;
-            cct_conflict_miss_map[cct]++;
+            dobj_conflict_miss_map[dobj_str]++;
             // swap out cb
             CacheBump cb;
-            cb.addr = swap_out_addr; cb.out_ins_cnt = total_ins_cnt; cb.out_cct = cct; cb.out_reason = CacheMissReason::CONFLICT;
+            cb.addr = swap_out_addr; cb.out_ins_cnt = total_ins_cnt; cb.out_dobj_str = dobj_str; cb.out_reason = CacheMissReason::CONFLICT;
             cache_bump_map[swap_out_addr] = cb;
             // swap in cb
             if(cache_bump_map.find(addr) != cache_bump_map.end()){
                 if(total_ins_cnt - cache_bump_map[addr].out_ins_cnt < L1_CACHE_BUMP_GATE){
                     CacheBump& cb_swap_in = cache_bump_map[addr];
-                    cb_swap_in.in_ins_cnt = total_ins_cnt; cb_swap_in.in_cct = cct; cb_swap_in.in_reason = CacheMissReason::CONFLICT;
+                    cb_swap_in.in_ins_cnt = total_ins_cnt; cb_swap_in.in_dobj_str = dobj_str; cb_swap_in.in_reason = CacheMissReason::CONFLICT;
                     cache_bump_list.push_back(cache_bump_map[addr]);
                     cache_bump_map.erase(addr);
                 }else
@@ -312,16 +342,16 @@ void L1Cache::store(uint64_t addr, int32_t cct, int32_t write_bytes, int32_t tid
         }else{
             // capacity miss
             l1_capacity_miss_cnt++;
-            cct_capacity_miss_map[cct]++;
+            dobj_capacity_miss_map[dobj_str]++;
             // swap out cb
             CacheBump cb;
-            cb.addr = swap_out_addr; cb.out_ins_cnt = total_ins_cnt; cb.out_cct = cct; cb.out_reason = CacheMissReason::CAPACITY;
+            cb.addr = swap_out_addr; cb.out_ins_cnt = total_ins_cnt; cb.out_dobj_str = dobj_str; cb.out_reason = CacheMissReason::CAPACITY;
             cache_bump_map[swap_out_addr] = cb;
             // swap in cb
             if(cache_bump_map.find(addr) != cache_bump_map.end()){
                 if(total_ins_cnt - cache_bump_map[addr].out_ins_cnt < L1_CACHE_BUMP_GATE){
                     CacheBump& cb_swap_in = cache_bump_map[addr];
-                    cb_swap_in.in_ins_cnt = total_ins_cnt; cb_swap_in.in_cct = cct; cb_swap_in.in_reason = CacheMissReason::CAPACITY;
+                    cb_swap_in.in_ins_cnt = total_ins_cnt; cb_swap_in.in_dobj_str = dobj_str; cb_swap_in.in_reason = CacheMissReason::CAPACITY;
                     cache_bump_list.push_back(cache_bump_map[addr]);
                     cache_bump_map.erase(addr);
                 }else
@@ -441,52 +471,20 @@ bool L1Cache::find_cacheline(uint32_t index, uint64_t tag, uint32_t& way){
     return false;
 }
 
-bool L1Cache::check_prefetch(uint64_t new_addr){
-    bool found = false;
-    // 检查 i = 1..8 的 16 个候选值
-    for (uint64_t i = 1; i <= 4; ++i) {
-        uint64_t a = new_addr - i;
-        uint64_t b = new_addr - i - i;
-        uint64_t c = new_addr - i - i - i;
-
-        // 在 hash set 中查询
-        if (prefetch_prefix_set.find(a) != prefetch_prefix_set.end() &&
-            prefetch_prefix_set.find(b) != prefetch_prefix_set.end() &&
-            prefetch_prefix_set.find(c) != prefetch_prefix_set.end()) {
-            found = true;
-            break;
-        }
-    }
-
-    // 维护固定容量队列
-    if (prefetch_prefix_deque.size() == PREFETCH_CAPACITY) {
-        // 队满：弹出队首，同时从 set 中删除
-        uint64_t front = prefetch_prefix_deque.front();
-        prefetch_prefix_deque.pop_front();
-        prefetch_prefix_set.erase(front);
-    }
-
-    // 插入新地址到队尾，并放入 set
-    prefetch_prefix_deque.push_back(new_addr);
-    prefetch_prefix_set.insert(new_addr);
-
-    return found;
-}
-
 void L1Cache::print_total_info(){
     printf("L1Cache Total l1_miss_cnt: %ld\n", l1_miss_cnt);
     printf("L1Cache Total l1_load_miss_cnt: %ld\n", l1_load_miss_cnt);
-    printf("L1Cache Total l1_store_miss_cnt: %ld\n", l1_store_miss_cnt);
     printf("L1Cache coherence miss cnt: %ld\n", l1_coherence_miss_cnt);
     printf("L1Cache capacity miss cnt: %ld\n", l1_capacity_miss_cnt);
     printf("L1Cache conflict miss cnt: %ld\n\n", l1_conflict_miss_cnt);
+    printf("L1Cache prefetch miss cnt: %ld\n\n", l1_prefetch_miss_cnt);
 
     dr_fprintf(output_file, "L1Cache Total l1_miss_cnt: %ld\n", l1_miss_cnt);
     dr_fprintf(output_file, "L1Cache Total l1_load_miss_cnt: %ld\n", l1_load_miss_cnt);
-    dr_fprintf(output_file, "L1Cache Total l1_store_miss_cnt: %ld\n", l1_store_miss_cnt);
     dr_fprintf(output_file, "L1Cache coherence miss cnt: %ld\n", l1_coherence_miss_cnt);
     dr_fprintf(output_file, "L1Cache capacity miss cnt: %ld\n", l1_capacity_miss_cnt);
     dr_fprintf(output_file, "L1Cache conflict miss cnt: %ld\n\n", l1_conflict_miss_cnt);
+    dr_fprintf(output_file, "L1Cache prefetch miss cnt: %ld\n\n", l1_prefetch_miss_cnt);
 
     std::unordered_map<uint64_t, int> addr_count;
     for (const auto& bump : cache_bump_list) {
@@ -494,59 +492,14 @@ void L1Cache::print_total_info(){
     }
     printf("缓存颠簸记录地址总数: %ld\n缓存颠簸记录总条数: %ld\n", addr_count.size(), cache_bump_list.size());
     dr_fprintf(output_file, "缓存颠簸记录地址总数: %ld\n缓存颠簸记录总条数: %ld\n", addr_count.size(), cache_bump_list.size());
-    printf("print total info done\n");
 }
 
-std::unordered_map<int32_t, int64_t>
-merge_context_by_call_path(const std::unordered_map<int32_t, int64_t>& cct_cnt)
-{
-    // 先把原 map 拷贝到一个 vector 中，方便顺序遍历
-    std::vector<std::pair<int32_t, int64_t>> entries;
-    entries.reserve(cct_cnt.size());
-    for (const auto& kv : cct_cnt) {
-        entries.emplace_back(kv.first, kv.second);
-    }
-
-    std::unordered_map<int32_t, int64_t> merged;
-
-    // merged 中的每个 key 是一个“代表 context”，其 value 是所有等价 context 的计数和
-    for (const auto& kv : entries) {
-        int32_t ctxt = kv.first;
-        int64_t count = kv.second;
-
-        bool merged_to_existing = false;
-
-        // 在线性扫描 merged，寻找一个等价的代表 key
-        for (auto& rep_kv : merged) {
-            int32_t rep_ctxt = rep_kv.first;
-            if (drcctlib_have_same_source_line((context_handle_t)ctxt, (context_handle_t)rep_ctxt)) {
-                // 找到等价的调用路径，累加计数后标记已合并
-                rep_kv.second += count;
-                merged_to_existing = true;
-                break;
-            }
-        }
-
-        // 如果没找到等价 key，就把当前 ctxt 作为新的代表插入
-        if (!merged_to_existing) {
-            merged.emplace(ctxt, count);
-        }
-    }
-
-    return merged;
-}
-
-void L1Cache::print_miss_cnt_topk(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, CacheMissReason cache_reason){
-
-    // 将相同的上下文调用栈数量合并
-    std::unordered_map<int32_t, int64_t> merged_cct_miss_map = merge_context_by_call_path(cct_miss_map);
-
-
+void L1Cache::print_miss_cnt_topk(int topk, std::unordered_map<std::string, int64_t>& dobj_miss_map, CacheMissReason cache_reason){
     dr_fprintf(output_file, "\n统计缓存缺失类型 %s 的前 %d 条记录的cct值以及其缺失数量:\n",
         reason_to_string(cache_reason).c_str(), topk);
-    std::vector<std::pair<int32_t, int64_t>> pairs(cct_miss_map.begin(), cct_miss_map.end());
+    std::vector<std::pair<std::string, int64_t>> pairs(dobj_miss_map.begin(), dobj_miss_map.end());
 
-    sort(pairs.begin(), pairs.end(), [](const std::pair<int32_t, int64_t>& a, const std::pair<int32_t, int64_t>& b) {
+    sort(pairs.begin(), pairs.end(), [](const std::pair<std::string, int64_t>& a, const std::pair<std::string, int64_t>& b) {
         return a.second > b.second; // 根据值降序排序
     });
 
@@ -555,69 +508,74 @@ void L1Cache::print_miss_cnt_topk(int topk, std::unordered_map<int32_t, int64_t>
         dr_fprintf(output_file, "由于该类型总计数量小于topk，故将topk调整为 %d\n", topk);
     }
 
-    for(std::pair<int32_t, int64_t>& p : std::vector<std::pair<int32_t, int64_t>>(pairs.begin(), pairs.begin() + topk)){
-        dr_fprintf(output_file, "cct %d : miss cnt %ld %.2f%% \n", p.first, p.second, (((float)p.second)/l1_miss_cnt)*100);
+    for(std::pair<std::string, int64_t>& p : std::vector<std::pair<std::string, int64_t>>(pairs.begin(), pairs.begin() + topk)){
+        dr_fprintf(output_file, "dobj %s : miss cnt %ld\n", p.first.c_str(), p.second);
     }
 
-    dr_fprintf(output_file, "\n给出上述记录cct索引到的backtrace位置");
-    for(std::pair<int32_t, int64_t>& p : std::vector<std::pair<int32_t, int64_t>>(pairs.begin(), pairs.begin() + topk)){
-        dr_fprintf(output_file, "cct %d : miss cnt %ld %.2f%% \n", p.first, p.second, (((float)p.second)/l1_miss_cnt)*100);
-        drcctlib_print_backtrace(output_file, p.first, false, true, 50 /*MAX_CCT_DEPTH*/);
+    dr_fprintf(output_file, "\n给出上述记录dobj索引到的backtrace位置");
+    for(std::pair<std::string, int64_t>& p : std::vector<std::pair<std::string, int64_t>>(pairs.begin(), pairs.begin() + topk)){
+        dr_fprintf(output_file, "dobj %s : miss cnt %ld\n", p.first.c_str(), p.second);
+        // drcctlib_print_backtrace(output_file, p.first, false, true, 50 /*MAX_CCT_DEPTH*/);
+        data_handle_t target_dobj;
+        if(string_to_dobj(p.first, target_dobj)){
+            if(target_dobj.object_type == DYNAMIC_OBJECT){
+                drcctlib_print_backtrace(output_file, target_dobj.sym_name, true, true, 10 /* MAX_DEPTH */);
+            } else if (target_dobj.object_type == STATIC_OBJECT){
+                dr_fprintf(output_file, "Static Object %s\n", drcctlib_get_str_from_strpool((uint32_t)target_dobj.sym_name));
+            }
+        }   
     }
     dr_fprintf(output_file, "\n\n");
 }
 
-void L1Cache::print_cache_bump(int topk, int num_print_event){
-    dr_fprintf(output_file, "给出前 %d 次缓存颠簸地址记录\n", topk);
+// void L1Cache::print_cache_bump(int topk){
+//     dr_fprintf(output_file, "给出前 %d 次缓存颠簸地址记录\n", topk);
 
-    // 1. 使用unordered_map统计每个addr出现的次数
-    std::unordered_map<uint64_t, std::vector<CacheBump>> addr_count;
+//     // 1. 使用unordered_map统计每个addr出现的次数
+//     std::unordered_map<uint64_t, std::vector<CacheBump>> addr_count;
     
-    for (const auto& bump : cache_bump_list) {
-        addr_count[bump.addr].push_back(bump);
-    }
+//     for (const auto& bump : cache_bump_list) {
+//         addr_count[bump.addr].push_back(bump);
+//     }
     
-    // 2. 将统计结果转移到vector中以便排序
-    std::vector<std::pair<uint64_t, std::vector<CacheBump>>> sorted_results;
-    for (const auto& pair : addr_count) {
-        sorted_results.push_back(pair);
-    }
+//     // 2. 将统计结果转移到vector中以便排序
+//     std::vector<std::pair<uint64_t, std::vector<CacheBump>>> sorted_results;
+//     for (const auto& pair : addr_count) {
+//         sorted_results.push_back(pair);
+//     }
     
-    // 3. 按出现次数从高到低排序
-    std::sort(sorted_results.begin(), sorted_results.end(),
-              [](const std::pair<uint64_t, std::vector<CacheBump>>& a, 
-                 const std::pair<uint64_t, std::vector<CacheBump>>& b) {
-                  return a.second.size() > b.second.size();  // 按次数降序排列
-              });
+//     // 3. 按出现次数从高到低排序
+//     std::sort(sorted_results.begin(), sorted_results.end(),
+//               [](const std::pair<uint64_t, std::vector<CacheBump>>& a, 
+//                  const std::pair<uint64_t, std::vector<CacheBump>>& b) {
+//                   return a.second.size() > b.second.size();  // 按次数降序排列
+//               });
     
-    // 4. 输出结果
-    dr_fprintf(output_file, "CacheBump addr出现次数统计（从高到低）：");
-    if (topk > (int)sorted_results.size()) {
-        topk = (int)sorted_results.size(); // 防止 k 超过元素数量
-        dr_fprintf(output_file, "由于该类型总计数量小于topk，故将topk调整为 ", topk);
-    }
-    for (const auto& result : std::vector<std::pair<uint64_t, std::vector<CacheBump>>>(sorted_results.begin(), sorted_results.begin()+topk)) {
-        dr_fprintf(output_file, "addr %ld : cache bump cnt %d\n", result.first, result.second.size());
-    }
+//     // 4. 输出结果
+//     dr_fprintf(output_file, "CacheBump addr出现次数统计（从高到低）：");
+//     if (topk > (int)sorted_results.size()) {
+//         topk = (int)sorted_results.size(); // 防止 k 超过元素数量
+//         dr_fprintf(output_file, "由于该类型总计数量小于topk，故将topk调整为 ", topk);
+//     }
+//     for (const auto& result : std::vector<std::pair<uint64_t, std::vector<CacheBump>>>(sorted_results.begin(), sorted_results.begin()+topk)) {
+//         dr_fprintf(output_file, "addr %ld : cache bump cnt %d\n", result.first, result.second.size());
+//     }
 
-    for (const auto& result : std::vector<std::pair<uint64_t, std::vector<CacheBump>>>(sorted_results.begin(), sorted_results.begin()+topk)) {
-        dr_fprintf(output_file, "addr %ld : cache bump cnt %d\n", result.first, result.second.size());
-        dr_fprintf(output_file, "对于地址 %lu 处发生的缓存颠簸事件详细信息(最多输出 %d 条事件):\n", result.first, num_print_event);
-        int print_event_cnt = 1;
-        for(CacheBump cb : result.second){
-            if(print_event_cnt++ > num_print_event)
-                break;
-            dr_fprintf(output_file, "颠簸记录 >>>>>> \n");
-            dr_fprintf(output_file, "该地址在cct %d 处被换出，换出原因 <%s> ，在cct %d 处被换入，换入原因 <%s>\n", 
-                cb.out_cct, reason_to_string(cb.out_reason).c_str(), cb.in_cct, reason_to_string(cb.in_reason).c_str());
+//     for (const auto& result : std::vector<std::pair<uint64_t, std::vector<CacheBump>>>(sorted_results.begin(), sorted_results.begin()+topk)) {
+//         dr_fprintf(output_file, "addr %ld : cache bump cnt %d\n", result.first, result.second.size());
+//         dr_fprintf(output_file, "对于地址 %lu 处发生的缓存颠簸事件详细信息:\n", result.first);
+//         for(CacheBump cb : result.second){
+//             dr_fprintf(output_file, "颠簸记录 >>> \n");
+//             dr_fprintf(output_file, "该地址在dobj %d 处被换出，换出原因 <%s> ，在dobj %d 处被换入，换入原因 <%s>\n", 
+//                 cb.out_dobj, reason_to_string(cb.out_reason).c_str(), cb.in_dobj, reason_to_string(cb.in_reason).c_str());
 
-            dr_fprintf(output_file, "换出 backtrace \n");
-            drcctlib_print_backtrace(output_file, cb.out_cct, false, true, 50 /*MAX_CCT_DEPTH*/);
-            dr_fprintf(output_file, "换入 backtrace \n");
-            drcctlib_print_backtrace(output_file, cb.in_cct, false, true, 50 /*MAX_CCT_DEPTH*/);
-        }
-    }
-}
+//             dr_fprintf(output_file, "换出 backtrace \n");
+//             drcctlib_print_backtrace(output_file, cb.out_dobj, false, true, 50 /*MAX_CCT_DEPTH*/);
+//             dr_fprintf(output_file, "换入 backtrace \n");
+//             drcctlib_print_backtrace(output_file, cb.in_dobj, false, true, 50 /*MAX_CCT_DEPTH*/);
+//         }
+//     }
+// }
 
 void L1Cache::clean_steal_cache_bump_map(){
     for (auto it = cache_bump_map.begin(); it != cache_bump_map.end(); ) {
@@ -630,12 +588,9 @@ void L1Cache::clean_steal_cache_bump_map(){
 
 void L1Cache::print_result(){
     print_total_info();
-    
-    print_miss_cnt_topk(10, cct_coherence_miss_map, CacheMissReason::COHERENCE);    dr_fprintf(output_file, COHERENCE_MISS_OPTIMIZE.c_str());
-    print_miss_cnt_topk(20, cct_capacity_miss_map, CacheMissReason::CAPACITY);      dr_fprintf(output_file, CAPACITY_MISS_OPTIMIZE.c_str());
-    print_miss_cnt_topk(10, cct_conflict_miss_map, CacheMissReason::CONFLICT);      dr_fprintf(output_file, CONFLICT_MISS_OPTIMIZE.c_str());
-
-    print_cache_bump(10, 3);
-    
-    printf("print result done\n");
+    // dr_fprintf(output_file, "容量缺失 topk \n", l1_miss_cnt);
+    // print_miss_cnt_topk(10, dobj_coherence_miss_map, CacheMissReason::COHERENCE);
+    print_miss_cnt_topk(20, dobj_capacity_miss_map, CacheMissReason::CAPACITY);
+    // print_miss_cnt_topk(10, dobj_conflict_miss_map, CacheMissReason::CONFLICT);
+    // print_cache_bump(10);
 }

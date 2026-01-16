@@ -1,0 +1,86 @@
+#ifndef CACHE_COMMON_H
+#define CACHE_COMMON_H
+
+#include <cstdint>
+#include <vector>
+#include <unordered_map>
+
+#include "page_table.h"
+#include "drcctlib.h"
+
+// 1. 文档定义的硬件参数（2.6.1/2.7.1节）
+const uint32_t L1_CACHE_SIZE = 64;          // L1 Cache size 64 KB
+const uint32_t L2_CACHE_SIZE = 128;         // L2 Cache size 128 KB
+const uint32_t CACHE_LINE_SIZE = 64;       // 所有层级行大小均为64字节（{insert\_element\_0\_}、{insert\_element\_1\_}、{insert\_element\_2\_}）
+const uint32_t L1_ASSOCIATIVITY = 4;       // L1I/L1D均为4路组相联（{insert\_element\_3\_}、{insert\_element\_4\_}）
+const uint32_t L2_ASSOCIATIVITY = 4;       // L2为4路组相联（{insert\_element\_5\_}）
+// const uint32_t L3_ASSOCIATIVITY = 8;       // L3默认8路组相联（文档未明确，参考DSU通用设计）
+const uint64_t L1_INS_CNT_GATE = 10000;
+const uint8_t L1_CONFLICT_MISS_GATE = 1;
+const uint64_t L1_CACHE_BUMP_GATE = 200;
+
+enum class CacheMissReason {
+    COHERENCE,
+    CAPACITY,
+    CONFLICT
+};
+
+// 3. 缓存行结构（存储Tag、MESI状态、数据、脏位等核心信息）
+struct CacheLine {
+    uint64_t addr = 0;
+    uint64_t tag = 0;              // 物理地址的Tag部分（VIPT中L1D用物理Tag）
+    ShadowPage* sp = nullptr;
+    bool empty = true;
+    
+    uint32_t lru_counter = 0;      // LRU替换算法计数器 (数越大，越久未访问)
+
+    uint64_t last_miss_ins_cnt = 0; // 上一次缺失时间（指令计数值）
+    uint8_t accu_miss_cnt = 0;      // 缺失累计（用于判断是否超过阈值）
+};
+
+// 4. 地址拆分工具（将物理地址拆分为Tag、Index、Offset，适配不同缓存大小）
+struct AddressSplitter {
+    // 输入：物理地址、缓存大小 → 输出：Tag、Index、Offset
+    static void split(uint64_t phys_addr, uint32_t cache_size, 
+                      uint64_t& tag, uint32_t& index, uint32_t& offset) {
+        offset = phys_addr % CACHE_LINE_SIZE;  // 低6位（64字节行）
+        uint32_t num_sets = cache_size / (CACHE_LINE_SIZE * L1_ASSOCIATIVITY);  // 总组数=容量/(行大小×路数)
+        index = (phys_addr / CACHE_LINE_SIZE) % num_sets;  // Index = 行号 % 总组数
+        tag = phys_addr / (CACHE_LINE_SIZE * num_sets);    // Tag = 物理地址 / (行大小×总组数)
+    }
+};
+
+// struct CacheBump {
+//     uint64_t addr;
+    
+//     uint64_t out_ins_cnt;
+//     int32_t out_cct;
+//     CacheMissReason out_reason;
+
+//     uint64_t in_ins_cnt;
+//     int32_t in_cct;
+//     CacheMissReason in_reason;
+// };
+
+struct CacheBump {
+    uint64_t addr;
+    
+    uint64_t out_ins_cnt;
+    std::string out_dobj_str;
+    CacheMissReason out_reason;
+
+    uint64_t in_ins_cnt;
+    std::string in_dobj_str;
+    CacheMissReason in_reason;
+};
+
+inline std::string reason_to_string(CacheMissReason reason) {
+    switch (reason) {
+        case CacheMissReason::COHERENCE: return "一致性缺失";
+        case CacheMissReason::CAPACITY:   return "容量缺失";
+        case CacheMissReason::CONFLICT:   return "冲突缺失";
+        default: return "未知缺失";
+    }
+}
+
+#endif // CACHE_COMMON_H
