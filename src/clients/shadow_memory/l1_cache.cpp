@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <iostream>
+#include <queue>
 
 #include "l1_cache.h"
 #include "l2_cache.h"
@@ -54,11 +55,11 @@ void L1Cache::print_here(val_info_t *info){
 
 bool cct_catch(int32_t cct){
     // srad 272 line 
-    // return (cct == 25541) || (cct == 25538) || (cct == 25542) || (cct == 25545) || (cct == 25543);
+    // return (cct == 25500) || (cct == 25461) || (cct == 25410) || (cct == 25447);
     // srad 205 line
     // return (cct == 25369);
     // srad 243 line
-    // return (cct == 25458);
+    // return (cct == 25500);
     // is
     // return (cct == 25454) || (cct == 25455) || (cct == 25456) || (cct == 25460);
     return false;
@@ -70,14 +71,15 @@ void L1Cache::load(uint64_t addr, int32_t cct, int32_t read_bytes, int32_t tid){
     AddressSplitter::split(addr, cache_size, tag, index, offset);
     // dr_fprintf(output_file, "read addr %lu read bytes %d B\n", addr, read_bytes);
     // printf("read addr %lu read bytes %d B\n", addr, read_bytes);
-    // need multi cacheline split ?
-    if(offset + read_bytes > L1_CACHE_SIZE){
-        // printf("need multi cacheline split addr %lu read_bytes %d offset %u\n", addr, read_bytes, offset); fflush(NULL);
-        load(addr + (L1_CACHE_SIZE - offset), cct, read_bytes - (L1_CACHE_SIZE - offset), tid);
-    }
 
     // prefetch
     bool prefetched = check_prefetch(addr);
+
+    // need multi cacheline split ?
+    if(!prefetched && offset + read_bytes > L1_CACHE_SIZE){
+        // printf("need multi cacheline split addr %lu read_bytes %d offset %u\n", addr, read_bytes, offset); fflush(NULL);
+        load(addr + (L1_CACHE_SIZE - offset), cct, read_bytes - (L1_CACHE_SIZE - offset), tid);
+    }
 
     if(cct_catch(cct) || print_flag){
         print_flag = true;
@@ -150,6 +152,14 @@ void L1Cache::load(uint64_t addr, int32_t cct, int32_t read_bytes, int32_t tid){
                 dr_fprintf(output_file, "cct %d X read miss addr %lu read bytes %d B\n", cct, addr, read_bytes);
             }
         }
+
+        // if(!prefetched && cct_catch(cct)){
+        //     dr_fprintf(output_file, "prefetch_prefix_deque >>>>>> \n");
+        //     for(uint64_t a : prefetch_prefix_deque){
+        //         dr_fprintf(output_file, "addr %lu\n", a);
+        //     }
+        //     dr_fprintf(output_file, "prefetch_prefix_deque <<<<<< \n");
+        // }
 
         // printf("LOAD MISS\n\n");
         // Ask L2
@@ -444,15 +454,16 @@ bool L1Cache::find_cacheline(uint32_t index, uint64_t tag, uint32_t& way){
 bool L1Cache::check_prefetch(uint64_t new_addr){
     bool found = false;
     // 检查 i = 1..8 的 16 个候选值
-    for (uint64_t i = 1; i <= 4; ++i) {
-        uint64_t a = new_addr - i;
-        uint64_t b = new_addr - i - i;
-        uint64_t c = new_addr - i - i - i;
+    std::vector<int64_t> diff_list({-1,-2,-4,2,4});
+    for(int64_t diff : diff_list){
+        uint64_t a = (int64_t)new_addr + diff;
+        uint64_t b = (int64_t)new_addr + diff + diff;
+        uint64_t c = (int64_t)new_addr + diff + diff + diff;
 
         // 在 hash set 中查询
-        if (prefetch_prefix_set.find(a) != prefetch_prefix_set.end() &&
-            prefetch_prefix_set.find(b) != prefetch_prefix_set.end() &&
-            prefetch_prefix_set.find(c) != prefetch_prefix_set.end()) {
+        if (prefetch_prefix_map.find(a) != prefetch_prefix_map.end() &&
+            prefetch_prefix_map.find(b) != prefetch_prefix_map.end() &&
+            prefetch_prefix_map.find(c) != prefetch_prefix_map.end() ) {
             found = true;
             break;
         }
@@ -463,12 +474,14 @@ bool L1Cache::check_prefetch(uint64_t new_addr){
         // 队满：弹出队首，同时从 set 中删除
         uint64_t front = prefetch_prefix_deque.front();
         prefetch_prefix_deque.pop_front();
-        prefetch_prefix_set.erase(front);
+        auto iter = prefetch_prefix_map.find(front);
+        if(--(iter->second) == 0)
+            prefetch_prefix_map.erase(iter);
     }
 
     // 插入新地址到队尾，并放入 set
     prefetch_prefix_deque.push_back(new_addr);
-    prefetch_prefix_set.insert(new_addr);
+    prefetch_prefix_map[new_addr]++;
 
     return found;
 }
@@ -488,13 +501,7 @@ void L1Cache::print_total_info(){
     dr_fprintf(output_file, "L1Cache capacity miss cnt: %ld\n", l1_capacity_miss_cnt);
     dr_fprintf(output_file, "L1Cache conflict miss cnt: %ld\n\n", l1_conflict_miss_cnt);
 
-    std::unordered_map<uint64_t, int> addr_count;
-    for (const auto& bump : cache_bump_list) {
-        addr_count[bump.addr]++;
-    }
-    printf("缓存颠簸记录地址总数: %ld\n缓存颠簸记录总条数: %ld\n", addr_count.size(), cache_bump_list.size());
-    dr_fprintf(output_file, "缓存颠簸记录地址总数: %ld\n缓存颠簸记录总条数: %ld\n", addr_count.size(), cache_bump_list.size());
-    printf("print total info done\n");
+    printf("<<< Total info done <<<\n");
 }
 
 std::unordered_map<int32_t, int64_t>
@@ -536,71 +543,274 @@ merge_context_by_call_path(const std::unordered_map<int32_t, int64_t>& cct_cnt)
     return merged;
 }
 
+std::unordered_map<int32_t, int64_t>
+merge_context_by_call_path_fast(std::unordered_map<int32_t, int64_t>& cct_cnt)
+{
+    // const size_t total_size = cct_cnt.size();
+    std::unordered_map<int32_t/*cct_hndl*/, int64_t/*count*/> merged;
+    // std::unordered_map<int32_t/*line_no*/, int32_t/*cct_hndl*/> ctxt_to_rep;
+
+    for(auto kv = cct_cnt.begin(); kv != cct_cnt.end(); ){
+        const int32_t curr_cct_hndl = kv->first;
+        const int64_t curr_count = kv->second;
+        kv = cct_cnt.erase(kv);
+
+        if (curr_count < 10){
+            continue;
+        }
+
+        // 缓存命中，直接累加
+        // inner_context_t *ctxt = ctxt_get_from_ctxt_hndl((context_handle_t) curr_cct_hndl);
+        // int line_no = ctxt->line_no; ctxt_free(ctxt);
+        // auto ctxt_iter = ctxt_to_rep.find(line_no);
+        // if (ctxt_iter != ctxt_to_rep.end()) {
+        //     merged[ctxt_iter->second] += curr_count;
+        //     continue;
+        // }
+
+        // 缓存未命中，查找等价代表
+        int32_t found_rep = -1;
+        for (const auto& rep_kv : merged) {
+            if (drcctlib_have_same_source_line((context_handle_t)curr_cct_hndl, (context_handle_t)rep_kv.first)) {
+                found_rep = rep_kv.first;
+                break;
+            }
+        }
+        
+        if (found_rep != -1) {  // found
+            merged[found_rep] += curr_count;
+            // ctxt_to_rep.emplace(line_no, found_rep);
+        } else {
+            merged.emplace(curr_cct_hndl, curr_count);
+            // ctxt_to_rep.emplace(line_no, curr_cct_hndl);
+        }
+    }
+
+    return merged;
+}
+
+void sort_topk_miss_cnt(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, std::vector<std::pair<int32_t, int64_t>>& out){
+    if (topk == 0 || cct_miss_map.empty()) {
+        out.clear();
+        return;
+    }
+
+    using Pair = std::pair<int32_t, int64_t>;
+    // 按值从小到大排（小顶堆），堆顶是当前最小的那个
+    auto cmp = [](const Pair& a, const Pair& b) {
+        return a.second > b.second; // value 小的优先
+    };
+
+    std::priority_queue<Pair, std::vector<Pair>, decltype(cmp)> minHeap(cmp);
+
+    for (const auto& kv : cct_miss_map) {
+        if (minHeap.size() < (size_t)topk) {
+            minHeap.push(kv);
+        } else if (kv.second > minHeap.top().second) {
+            minHeap.pop();
+            minHeap.push(kv);
+        }
+    }
+
+    out.resize(minHeap.size());
+    for (int i = (int)minHeap.size() - 1; i >= 0; --i) {
+        out[i] = minHeap.top();
+        minHeap.pop();
+    }
+    // out 此时是按 value 降序
+}
+
 void L1Cache::print_miss_cnt_topk(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, CacheMissReason cache_reason){
 
     // 将相同的上下文调用栈数量合并
-    std::unordered_map<int32_t, int64_t> merged_cct_miss_map = merge_context_by_call_path(cct_miss_map);
+    std::unordered_map<int32_t, int64_t> merged_cct_miss_map = merge_context_by_call_path_fast(cct_miss_map);
+    assert(cct_miss_map.size() == 0);
+
+
+    // 排序并获得Topk cct，其余丢掉
+    std::vector<std::pair<int32_t, int64_t>> sorted_topk_cct_miss_map;
+    if (topk > (int)merged_cct_miss_map.size()) {
+        topk = (int)merged_cct_miss_map.size(); // 防止 k 超过元素数量
+        dr_fprintf(output_file, "由于该类型总计数量小于topk，故将topk调整为 %d\n", topk);
+    }
+    sort_topk_miss_cnt(topk, merged_cct_miss_map, sorted_topk_cct_miss_map);   merged_cct_miss_map.clear();
 
 
     dr_fprintf(output_file, "\n统计缓存缺失类型 %s 的前 %d 条记录的cct值以及其缺失数量:\n",
         reason_to_string(cache_reason).c_str(), topk);
-    std::vector<std::pair<int32_t, int64_t>> pairs(cct_miss_map.begin(), cct_miss_map.end());
 
-    sort(pairs.begin(), pairs.end(), [](const std::pair<int32_t, int64_t>& a, const std::pair<int32_t, int64_t>& b) {
-        return a.second > b.second; // 根据值降序排序
-    });
-
-    if (topk > (int)pairs.size()) {
-        topk = (int)pairs.size(); // 防止 k 超过元素数量
-        dr_fprintf(output_file, "由于该类型总计数量小于topk，故将topk调整为 %d\n", topk);
-    }
-
-    for(std::pair<int32_t, int64_t>& p : std::vector<std::pair<int32_t, int64_t>>(pairs.begin(), pairs.begin() + topk)){
+    for(std::pair<int32_t, int64_t>& p : sorted_topk_cct_miss_map){
         dr_fprintf(output_file, "cct %d : miss cnt %ld %.2f%% \n", p.first, p.second, (((float)p.second)/l1_miss_cnt)*100);
     }
 
-    dr_fprintf(output_file, "\n给出上述记录cct索引到的backtrace位置");
-    for(std::pair<int32_t, int64_t>& p : std::vector<std::pair<int32_t, int64_t>>(pairs.begin(), pairs.begin() + topk)){
+    dr_fprintf(output_file, "\n给出上述记录cct索引到的backtrace位置\n");
+    for(std::pair<int32_t, int64_t>& p : sorted_topk_cct_miss_map){
         dr_fprintf(output_file, "cct %d : miss cnt %ld %.2f%% \n", p.first, p.second, (((float)p.second)/l1_miss_cnt)*100);
         drcctlib_print_backtrace(output_file, p.first, false, true, 50 /*MAX_CCT_DEPTH*/);
     }
     dr_fprintf(output_file, "\n\n");
 }
 
+
+void sort_topk_cache_bump(int topk, std::unordered_map<uint64_t, std::vector<CacheBump>>& cache_bump_map, std::vector<std::pair<uint64_t, std::vector<CacheBump>>>& out){
+    if (topk == 0 || cache_bump_map.empty()) {
+        out.clear();
+        return;
+    }
+
+    using Pair = std::pair<uint64_t, std::vector<CacheBump>>;
+    // 按值从小到大排（小顶堆），堆顶是当前最小的那个
+    auto cmp = [](const Pair& a, const Pair& b) {
+        return a.second.size() > b.second.size(); // value 小的优先
+    };
+
+    std::priority_queue<Pair, std::vector<Pair>, decltype(cmp)> minHeap(cmp);
+
+    for (const auto& kv : cache_bump_map) {
+        if (minHeap.size() < (size_t)topk) {
+            minHeap.push(std::move(kv));
+        } else if (kv.second.size() > minHeap.top().second.size()) {
+            minHeap.pop();
+            minHeap.push(std::move(kv));
+        }
+    }
+
+    out.resize(minHeap.size());
+    for (int i = (int)minHeap.size() - 1; i >= 0; --i) {
+        out[i] = minHeap.top();
+        minHeap.pop();
+    }
+    // out 此时是按 value 降序
+}
+
 void L1Cache::print_cache_bump(int topk, int num_print_event){
     dr_fprintf(output_file, "给出前 %d 次缓存颠簸地址记录\n", topk);
 
     // 1. 使用unordered_map统计每个addr出现的次数
+    printf("print cache bump list size %ld\n", cache_bump_list.size());
     std::unordered_map<uint64_t, std::vector<CacheBump>> addr_count;
-    
-    for (const auto& bump : cache_bump_list) {
-        addr_count[bump.addr].push_back(bump);
+    int cnt = 0;
+    for(const auto& iter : cache_bump_list){
+        addr_count[iter.addr].push_back(iter);
+        cnt++;
+        if((cnt % 10000) == 0)
+            printf("%d\n", cnt);
     }
+    // for (auto iter = cache_bump_list.begin(); iter != cache_bump_list.end(); iter++) {
+    //     // printf("%lu\n", iter->addr);
+    //     addr_count[iter->addr].push_back(*iter);
+    //     // iter = cache_bump_list.erase(iter);
+    // }
+    // assert(cache_bump_list.size() == 0);
+    printf("first done\n");
+
+    std::vector<std::pair<uint64_t, std::vector<CacheBump>>> sorted_results;
+    if (topk > (int)addr_count.size()) {
+        topk = (int)addr_count.size(); // 防止 k 超过元素数量
+        dr_fprintf(output_file, "由于该类型总计数量小于topk，故将topk调整为 ", topk);
+    }
+    sort_topk_cache_bump(topk, addr_count, sorted_results);
+    addr_count.clear();
+    printf("second done\n");
     
     // 2. 将统计结果转移到vector中以便排序
-    std::vector<std::pair<uint64_t, std::vector<CacheBump>>> sorted_results;
-    for (const auto& pair : addr_count) {
-        sorted_results.push_back(pair);
-    }
+    // std::vector<std::pair<uint64_t, std::vector<CacheBump>>> sorted_results;
+    // for (const auto& pair : addr_count) {
+    //     sorted_results.push_back(pair);
+    // }
     
     // 3. 按出现次数从高到低排序
-    std::sort(sorted_results.begin(), sorted_results.end(),
-              [](const std::pair<uint64_t, std::vector<CacheBump>>& a, 
-                 const std::pair<uint64_t, std::vector<CacheBump>>& b) {
-                  return a.second.size() > b.second.size();  // 按次数降序排列
-              });
+    // std::sort(sorted_results.begin(), sorted_results.end(),
+    //           [](const std::pair<uint64_t, std::vector<CacheBump>>& a, 
+    //              const std::pair<uint64_t, std::vector<CacheBump>>& b) {
+    //               return a.second.size() > b.second.size();  // 按次数降序排列
+    //           });
     
     // 4. 输出结果
     dr_fprintf(output_file, "CacheBump addr出现次数统计（从高到低）：");
-    if (topk > (int)sorted_results.size()) {
-        topk = (int)sorted_results.size(); // 防止 k 超过元素数量
-        dr_fprintf(output_file, "由于该类型总计数量小于topk，故将topk调整为 ", topk);
-    }
-    for (const auto& result : std::vector<std::pair<uint64_t, std::vector<CacheBump>>>(sorted_results.begin(), sorted_results.begin()+topk)) {
+
+    for (const auto& result : sorted_results) {
         dr_fprintf(output_file, "addr %ld : cache bump cnt %d\n", result.first, result.second.size());
     }
 
-    for (const auto& result : std::vector<std::pair<uint64_t, std::vector<CacheBump>>>(sorted_results.begin(), sorted_results.begin()+topk)) {
+    for (const auto& result : sorted_results) {
+        dr_fprintf(output_file, "addr %ld : cache bump cnt %d\n", result.first, result.second.size());
+        dr_fprintf(output_file, "对于地址 %lu 处发生的缓存颠簸事件详细信息(最多输出 %d 条事件):\n", result.first, num_print_event);
+        int print_event_cnt = 1;
+        for(CacheBump cb : result.second){
+            if(print_event_cnt++ > num_print_event)
+                break;
+            dr_fprintf(output_file, "颠簸记录 >>>>>> \n");
+            dr_fprintf(output_file, "该地址在cct %d 处被换出，换出原因 <%s> ，在cct %d 处被换入，换入原因 <%s>\n", 
+                cb.out_cct, reason_to_string(cb.out_reason).c_str(), cb.in_cct, reason_to_string(cb.in_reason).c_str());
+
+            dr_fprintf(output_file, "换出 backtrace \n");
+            drcctlib_print_backtrace(output_file, cb.out_cct, false, true, 50 /*MAX_CCT_DEPTH*/);
+            dr_fprintf(output_file, "换入 backtrace \n");
+            drcctlib_print_backtrace(output_file, cb.in_cct, false, true, 50 /*MAX_CCT_DEPTH*/);
+        }
+    }
+}
+
+void L1Cache::print_cache_bump_fast(int topk, int num_print_event){
+    dr_fprintf(output_file, "给出前 %d 次缓存颠簸地址记录\n", topk);
+
+    // 先对原数组按addr排序（关键：排序后相同addr连续）
+    std::sort(cache_bump_list.begin(), cache_bump_list.end(),
+          [](const CacheBump& a, const CacheBump& b) {
+              return a.addr < b.addr;
+          });
+
+    // 1. 使用unordered_map统计每个addr出现的次数
+    std::unordered_map<uint64_t, std::vector<CacheBump>> addr_count;
+    // 步骤2：遍历排序后的数组，批量分组，无哈希、无冲突、无多次扩容
+    auto begin = cache_bump_list.begin();
+    const auto end = cache_bump_list.end();
+    while (begin != end) {
+        const uint64_t curr_addr = begin->addr;
+        // 找到第一个addr != curr_addr的位置，批量获取所有相同addr的元素
+        auto split = std::partition_point(begin, end,
+            [curr_addr](const CacheBump& bump) {
+                return bump.addr == curr_addr;
+            });
+        // 一次性插入所有相同addr的元素，vector只扩容1次！
+        addr_count[curr_addr].assign(begin, split);
+        begin = split;
+    }
+    printf("缓存颠簸记录地址总数: %ld\n缓存颠簸记录总条数: %ld\n", addr_count.size(), cache_bump_list.size());
+    dr_fprintf(output_file, "缓存颠簸记录地址总数: %ld\n缓存颠簸记录总条数: %ld\n", addr_count.size(), cache_bump_list.size());
+    cache_bump_list.clear();
+
+    std::vector<std::pair<uint64_t, std::vector<CacheBump>>> sorted_results;
+    if (topk > (int)addr_count.size()) {
+        topk = (int)addr_count.size(); // 防止 k 超过元素数量
+        dr_fprintf(output_file, "由于该类型总计数量小于topk，故将topk调整为 ", topk);
+    }
+    sort_topk_cache_bump(topk, addr_count, sorted_results);
+    addr_count.clear();
+    
+    // 2. 将统计结果转移到vector中以便排序
+    // std::vector<std::pair<uint64_t, std::vector<CacheBump>>> sorted_results;
+    // for (const auto& pair : addr_count) {
+    //     sorted_results.push_back(pair);
+    // }
+    
+    // 3. 按出现次数从高到低排序
+    // std::sort(sorted_results.begin(), sorted_results.end(),
+    //           [](const std::pair<uint64_t, std::vector<CacheBump>>& a, 
+    //              const std::pair<uint64_t, std::vector<CacheBump>>& b) {
+    //               return a.second.size() > b.second.size();  // 按次数降序排列
+    //           });
+    
+    // 4. 输出结果
+    dr_fprintf(output_file, "CacheBump addr出现次数统计（从高到低）：\n");
+
+    for (const auto& result : sorted_results) {
+        dr_fprintf(output_file, "addr %ld : cache bump cnt %d\n", result.first, result.second.size());
+    }
+
+    for (const auto& result : sorted_results) {
+        dr_fprintf(output_file, "\n\n");
         dr_fprintf(output_file, "addr %ld : cache bump cnt %d\n", result.first, result.second.size());
         dr_fprintf(output_file, "对于地址 %lu 处发生的缓存颠簸事件详细信息(最多输出 %d 条事件):\n", result.first, num_print_event);
         int print_event_cnt = 1;
@@ -631,11 +841,9 @@ void L1Cache::clean_steal_cache_bump_map(){
 void L1Cache::print_result(){
     print_total_info();
     
-    print_miss_cnt_topk(10, cct_coherence_miss_map, CacheMissReason::COHERENCE);    dr_fprintf(output_file, COHERENCE_MISS_OPTIMIZE.c_str());
-    print_miss_cnt_topk(20, cct_capacity_miss_map, CacheMissReason::CAPACITY);      dr_fprintf(output_file, CAPACITY_MISS_OPTIMIZE.c_str());
-    print_miss_cnt_topk(10, cct_conflict_miss_map, CacheMissReason::CONFLICT);      dr_fprintf(output_file, CONFLICT_MISS_OPTIMIZE.c_str());
+    print_miss_cnt_topk(10, cct_coherence_miss_map, CacheMissReason::COHERENCE);    dr_fprintf(output_file, COHERENCE_MISS_OPTIMIZE.c_str()); 
+    print_miss_cnt_topk(20, cct_capacity_miss_map, CacheMissReason::CAPACITY);      dr_fprintf(output_file, CAPACITY_MISS_OPTIMIZE.c_str()); 
+    print_miss_cnt_topk(10, cct_conflict_miss_map, CacheMissReason::CONFLICT);      dr_fprintf(output_file, CONFLICT_MISS_OPTIMIZE.c_str()); 
 
-    print_cache_bump(10, 3);
-    
-    printf("print result done\n");
+    print_cache_bump_fast(10, 3);
 }

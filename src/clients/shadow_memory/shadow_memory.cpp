@@ -138,6 +138,7 @@ void ins_handler(L1Cache* l1d, val_info_t *info, per_thread_t* pt){
             // printf("read addr %lu read %d B\n", info->addr, (int)(info->size * info->esize));
             // printf("read size %d read esize %d\n", info->size, info->esize);
             l1d->load(info->addr, info->ctxt_hndl, (info->size * info->esize), tid);
+            // l1d->load(info->addr, info->ctxt_hndl, tid);
             // drcctlib_print_backtrace(pt->output_file, info->ctxt_hndl, false, true, 50 /*MAX_CCT_DEPTH*/);
             // printf("read  addr %lu, type %u, ctxt_hndl %d, tsc %lu, pc %lu\n", info->addr, info->type, info->ctxt_hndl, info->tsc, info->pc);
         }else if(((info->type) & (vprofile_src_t::WRITE)) && ((info->type) & (vprofile_src_t::BEFORE))){
@@ -147,6 +148,7 @@ void ins_handler(L1Cache* l1d, val_info_t *info, per_thread_t* pt){
             // printf("write size %d write esize %d\n", info->size, info->esize);
             // drcctlib_print_backtrace(pt->output_file, info->ctxt_hndl, false, true, 50 /*MAX_CCT_DEPTH*/);
             l1d->store(info->addr, info->ctxt_hndl, (info->size * info->esize), tid);
+            // l1d->store(info->addr, info->ctxt_hndl, tid);
             // printf("write addr %lu, type %u, ctxt_hndl %d, tsc %lu, pc %lu\n", info->addr, info->type, info->ctxt_hndl, info->tsc, info->pc);
         }else{
             // printf("not memory read and nor memory before write\n");

@@ -29,6 +29,9 @@ public:
     void load(uint64_t addr, int32_t cct, int32_t read_bytes, int32_t tid);
     void store(uint64_t addr, int32_t cct, int32_t write_bytes, int32_t tid);
 
+    // void load(uint64_t addr, int32_t cct, int32_t tid);
+    // void store(uint64_t addr, int32_t cct, int32_t tid);
+
     void print_result();
     
 private:
@@ -57,7 +60,7 @@ private:
     std::vector<CacheBump> cache_bump_list;
 
     std::deque<uint64_t> prefetch_prefix_deque;
-    std::unordered_set<uint64_t> prefetch_prefix_set;
+    std::unordered_map<uint64_t, int32_t> prefetch_prefix_map;
     // output result file_t
     file_t output_file;
 
@@ -75,6 +78,8 @@ private:
     void print_total_info();
     void print_miss_cnt_topk(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, CacheMissReason cache_reason);
     void print_cache_bump(int topk, int num_print_event);
+    void print_cache_bump_fast(int topk, int num_print_event);
+    // void print_cache_bump(int topk);
 
     void clean_steal_cache_bump_map();
 };
