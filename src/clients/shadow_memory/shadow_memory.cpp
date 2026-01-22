@@ -92,7 +92,7 @@ typedef struct _per_thread_t {
 
     // L1 Data Cache
     L1Cache* l1d;
-    long long memory_ins_cnt;
+    int64_t memory_ins_cnt;
     int64_t total_load_cnt;
     int64_t total_store_cnt;
 } per_thread_t;
@@ -225,15 +225,12 @@ static void
 ClientThreadEnd(void *drcontext)
 {
     per_thread_t *pt = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
-    pt->l1d->print_result();
+    pt->l1d->print_result(pt->total_load_cnt, pt->total_store_cnt, pt->memory_ins_cnt, pt->threadId);
     dr_close_file(pt->output_file);
     printf("output file closed\n");
     for(size_t i=0;i<pt->instr_clones->size();++i) {
         instr_destroy(drcontext, (*pt->instr_clones)[i]);
     }
-    printf("\n\ntotal load cnt %ld\n", pt->total_load_cnt);
-    printf("\ntotal store cnt %ld\n", pt->total_store_cnt);
-    printf("\ntotal memory cnt %lld\n", pt->memory_ins_cnt);
     delete pt->instr_clones;
     delete pt->INTRedLogMap;
     delete pt->FPRedLogMap;

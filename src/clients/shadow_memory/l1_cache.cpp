@@ -486,13 +486,16 @@ bool L1Cache::check_prefetch(uint64_t new_addr){
     return found;
 }
 
-void L1Cache::print_total_info(){
+void L1Cache::print_total_info(int64_t total_load_cnt, int64_t total_store_cnt, int64_t memory_ins_cnt){
     printf("L1Cache Total l1_miss_cnt: %ld\n", l1_miss_cnt);
     printf("L1Cache Total l1_load_miss_cnt: %ld\n", l1_load_miss_cnt);
     printf("L1Cache Total l1_store_miss_cnt: %ld\n", l1_store_miss_cnt);
     printf("L1Cache coherence miss cnt: %ld\n", l1_coherence_miss_cnt);
     printf("L1Cache capacity miss cnt: %ld\n", l1_capacity_miss_cnt);
     printf("L1Cache conflict miss cnt: %ld\n\n", l1_conflict_miss_cnt);
+    printf("total load cnt %ld\n", total_load_cnt);
+    printf("total store cnt %ld\n", total_store_cnt);
+    printf("total memory cnt %ld\n", memory_ins_cnt);
 
     dr_fprintf(output_file, "L1Cache Total l1_miss_cnt: %ld\n", l1_miss_cnt);
     dr_fprintf(output_file, "L1Cache Total l1_load_miss_cnt: %ld\n", l1_load_miss_cnt);
@@ -500,6 +503,9 @@ void L1Cache::print_total_info(){
     dr_fprintf(output_file, "L1Cache coherence miss cnt: %ld\n", l1_coherence_miss_cnt);
     dr_fprintf(output_file, "L1Cache capacity miss cnt: %ld\n", l1_capacity_miss_cnt);
     dr_fprintf(output_file, "L1Cache conflict miss cnt: %ld\n\n", l1_conflict_miss_cnt);
+    dr_fprintf(output_file, "total load cnt %ld\n", total_load_cnt);
+    dr_fprintf(output_file, "total store cnt %ld\n", total_store_cnt);
+    dr_fprintf(output_file, "total memory cnt %ld\n", memory_ins_cnt);
 
     printf("<<< Total info done <<<\n");
 }
@@ -544,16 +550,20 @@ merge_context_by_call_path(const std::unordered_map<int32_t, int64_t>& cct_cnt)
 }
 
 std::unordered_map<int32_t, int64_t>
-merge_context_by_call_path_fast(std::unordered_map<int32_t, int64_t>& cct_cnt)
+merge_context_by_call_path_fast(std::unordered_map<int32_t, int64_t>& cct_cnt, int32_t tid)
 {
     // const size_t total_size = cct_cnt.size();
     std::unordered_map<int32_t/*cct_hndl*/, int64_t/*count*/> merged;
     // std::unordered_map<int32_t/*line_no*/, int32_t/*cct_hndl*/> ctxt_to_rep;
-
+    int64_t cnt_flag = 0;
     for(auto kv = cct_cnt.begin(); kv != cct_cnt.end(); ){
         const int32_t curr_cct_hndl = kv->first;
         const int64_t curr_count = kv->second;
         kv = cct_cnt.erase(kv);
+        cnt_flag++;
+        if ((cnt_flag % 20000000) == 0){
+            printf("tid %d merge miss map size %ld\n", tid, cnt_flag); fflush(NULL);
+        }
 
         if (curr_count < 10){
             continue;
@@ -589,7 +599,7 @@ merge_context_by_call_path_fast(std::unordered_map<int32_t, int64_t>& cct_cnt)
     return merged;
 }
 
-void sort_topk_miss_cnt(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, std::vector<std::pair<int32_t, int64_t>>& out){
+void sort_topk_miss_cnt(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, std::vector<std::pair<int32_t, int64_t>>& out, int32_t tid){
     if (topk == 0 || cct_miss_map.empty()) {
         out.clear();
         return;
@@ -602,7 +612,7 @@ void sort_topk_miss_cnt(int topk, std::unordered_map<int32_t, int64_t>& cct_miss
     };
 
     std::priority_queue<Pair, std::vector<Pair>, decltype(cmp)> minHeap(cmp);
-
+    printf("tid %d add to priority_queue cct_miss map size %ld\n", tid, cct_miss_map.size()); fflush(NULL);
     for (const auto& kv : cct_miss_map) {
         if (minHeap.size() < (size_t)topk) {
             minHeap.push(kv);
@@ -611,6 +621,7 @@ void sort_topk_miss_cnt(int topk, std::unordered_map<int32_t, int64_t>& cct_miss
             minHeap.push(kv);
         }
     }
+    printf("tid %d add to priority_queue Done \n", tid); fflush(NULL);
 
     out.resize(minHeap.size());
     for (int i = (int)minHeap.size() - 1; i >= 0; --i) {
@@ -620,10 +631,12 @@ void sort_topk_miss_cnt(int topk, std::unordered_map<int32_t, int64_t>& cct_miss
     // out 此时是按 value 降序
 }
 
-void L1Cache::print_miss_cnt_topk(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, CacheMissReason cache_reason){
+void L1Cache::print_miss_cnt_topk(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, CacheMissReason cache_reason, int32_t tid){
 
     // 将相同的上下文调用栈数量合并
-    std::unordered_map<int32_t, int64_t> merged_cct_miss_map = merge_context_by_call_path_fast(cct_miss_map);
+    printf("tid %d miss map size %ld\n", tid, cct_miss_map.size()); fflush(NULL);
+    std::unordered_map<int32_t, int64_t> merged_cct_miss_map = merge_context_by_call_path_fast(cct_miss_map, tid);
+    printf("tid %d merge done, map size %ld\n", tid, merged_cct_miss_map.size()); fflush(NULL);
     assert(cct_miss_map.size() == 0);
 
 
@@ -633,7 +646,9 @@ void L1Cache::print_miss_cnt_topk(int topk, std::unordered_map<int32_t, int64_t>
         topk = (int)merged_cct_miss_map.size(); // 防止 k 超过元素数量
         dr_fprintf(output_file, "由于该类型总计数量小于topk，故将topk调整为 %d\n", topk);
     }
-    sort_topk_miss_cnt(topk, merged_cct_miss_map, sorted_topk_cct_miss_map);   merged_cct_miss_map.clear();
+    printf("tid %d try to sort topk miss \n", tid); fflush(NULL);
+    sort_topk_miss_cnt(topk, merged_cct_miss_map, sorted_topk_cct_miss_map, tid);   merged_cct_miss_map.clear();
+    printf("tid %d sort topk miss done \n", tid); fflush(NULL);
 
 
     dr_fprintf(output_file, "\n统计缓存缺失类型 %s 的前 %d 条记录的cct值以及其缺失数量:\n",
@@ -689,12 +704,8 @@ void L1Cache::print_cache_bump(int topk, int num_print_event){
     // 1. 使用unordered_map统计每个addr出现的次数
     printf("print cache bump list size %ld\n", cache_bump_list.size());
     std::unordered_map<uint64_t, std::vector<CacheBump>> addr_count;
-    int cnt = 0;
     for(const auto& iter : cache_bump_list){
         addr_count[iter.addr].push_back(iter);
-        cnt++;
-        if((cnt % 10000) == 0)
-            printf("%d\n", cnt);
     }
     // for (auto iter = cache_bump_list.begin(); iter != cache_bump_list.end(); iter++) {
     //     // printf("%lu\n", iter->addr);
@@ -756,11 +767,12 @@ void L1Cache::print_cache_bump_fast(int topk, int num_print_event){
     dr_fprintf(output_file, "给出前 %d 次缓存颠簸地址记录\n", topk);
 
     // 先对原数组按addr排序（关键：排序后相同addr连续）
+    printf("try to sort cache bump cache bump list size %ld\n", cache_bump_list.size()); fflush(NULL);
     std::sort(cache_bump_list.begin(), cache_bump_list.end(),
           [](const CacheBump& a, const CacheBump& b) {
               return a.addr < b.addr;
           });
-
+    printf("sort done, cache bump cache bump list size %ld\n", cache_bump_list.size()); fflush(NULL);
     // 1. 使用unordered_map统计每个addr出现的次数
     std::unordered_map<uint64_t, std::vector<CacheBump>> addr_count;
     // 步骤2：遍历排序后的数组，批量分组，无哈希、无冲突、无多次扩容
@@ -786,7 +798,9 @@ void L1Cache::print_cache_bump_fast(int topk, int num_print_event){
         topk = (int)addr_count.size(); // 防止 k 超过元素数量
         dr_fprintf(output_file, "由于该类型总计数量小于topk，故将topk调整为 ", topk);
     }
+    printf("sort topk cache bump\n"); fflush(NULL);
     sort_topk_cache_bump(topk, addr_count, sorted_results);
+    printf("sort topk cache bump done\n"); fflush(NULL);
     addr_count.clear();
     
     // 2. 将统计结果转移到vector中以便排序
@@ -838,12 +852,15 @@ void L1Cache::clean_steal_cache_bump_map(){
     }
 }
 
-void L1Cache::print_result(){
-    print_total_info();
+void L1Cache::print_result(int64_t total_load_cnt, int64_t total_store_cnt, int64_t memory_ins_cnt, int32_t tid){
+    print_total_info(total_load_cnt, total_store_cnt, memory_ins_cnt);
     
-    print_miss_cnt_topk(10, cct_coherence_miss_map, CacheMissReason::COHERENCE);    dr_fprintf(output_file, COHERENCE_MISS_OPTIMIZE.c_str()); 
-    print_miss_cnt_topk(20, cct_capacity_miss_map, CacheMissReason::CAPACITY);      dr_fprintf(output_file, CAPACITY_MISS_OPTIMIZE.c_str()); 
-    print_miss_cnt_topk(10, cct_conflict_miss_map, CacheMissReason::CONFLICT);      dr_fprintf(output_file, CONFLICT_MISS_OPTIMIZE.c_str()); 
+    printf("tid %d print coherence miss topk\n", tid); fflush(NULL);
+    print_miss_cnt_topk(10, cct_coherence_miss_map, CacheMissReason::COHERENCE, tid);    dr_fprintf(output_file, COHERENCE_MISS_OPTIMIZE.c_str()); 
+    printf("tid %d print capacity miss topk\n", tid); fflush(NULL);
+    print_miss_cnt_topk(20, cct_capacity_miss_map, CacheMissReason::CAPACITY, tid);      dr_fprintf(output_file, CAPACITY_MISS_OPTIMIZE.c_str()); 
+    printf("tid %d print conflict miss topk\n", tid); fflush(NULL);
+    print_miss_cnt_topk(10, cct_conflict_miss_map, CacheMissReason::CONFLICT, tid);      dr_fprintf(output_file, CONFLICT_MISS_OPTIMIZE.c_str()); 
 
     print_cache_bump_fast(10, 3);
 }

@@ -32,7 +32,7 @@ public:
     // void load(uint64_t addr, int32_t cct, int32_t tid);
     // void store(uint64_t addr, int32_t cct, int32_t tid);
 
-    void print_result();
+    void print_result(int64_t, int64_t total_store_cnt, int64_t memory_ins_cnt, int32_t tid);
     
 private:
 
@@ -75,8 +75,8 @@ private:
     // prefetch 
     bool check_prefetch(uint64_t new_addr);
 
-    void print_total_info();
-    void print_miss_cnt_topk(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, CacheMissReason cache_reason);
+    void print_total_info(int64_t total_load_cnt, int64_t total_store_cnt, int64_t memory_ins_cnt);
+    void print_miss_cnt_topk(int topk, std::unordered_map<int32_t, int64_t>& cct_miss_map, CacheMissReason cache_reason, int32_t tid);
     void print_cache_bump(int topk, int num_print_event);
     void print_cache_bump_fast(int topk, int num_print_event);
     // void print_cache_bump(int topk);
