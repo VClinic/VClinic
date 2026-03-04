@@ -288,10 +288,10 @@ void L1Cache::store(uint64_t addr, data_handle_t dobj, int32_t tid){
         else{
             // update_lru(index, way);
             hit_cacheline.sp->write(addr, tid);
-            l1_miss_cnt++;
-            l1_coherence_miss_cnt++;
-            std::string dobj_str = dobj_to_string(dobj);
-            dobj_coherence_miss_map[dobj_str]++;
+            // l1_miss_cnt++;
+            // l1_coherence_miss_cnt++;
+            // std::string dobj_str = dobj_to_string(dobj);
+            // dobj_coherence_miss_map[dobj_str]++;
             // printf("HIT AND DIRTY\n");
             return;
         }

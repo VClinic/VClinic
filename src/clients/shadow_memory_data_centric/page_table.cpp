@@ -31,7 +31,7 @@ bool ShadowPage::write(uint64_t addr, int32_t tid) {
     uint64_t dirty = 0;
     for (int i = 0; i < MAX_THREADS; i++) {
         if (i == tid) {
-            dirty = thread_dirty_bitmap[tid].load();
+            dirty = thread_dirty_bitmap[tid].fetch_and(~mask, std::memory_order_acquire);
         } else {
             thread_dirty_bitmap[i].fetch_or(mask, std::memory_order_acquire);
         }

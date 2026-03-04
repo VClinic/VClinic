@@ -6,37 +6,69 @@ inline uint64_t page_base_of(uint64_t addr) { return addr & ~(uint64_t)(PAGE_SIZ
 inline uint64_t offset_in_page(uint64_t addr) { return addr & (PAGE_SIZE - 1); }
 inline size_t line_index_of(uint64_t addr) { return (offset_in_page(addr) / CACHE_LINE); }
 
-bool ShadowPage::is_dirty(uint64_t addr, int32_t tid) {
+COHERENCE_MISS_REASON ShadowPage::is_dirty(uint64_t addr, int32_t tid, uint32_t offset) {
+    // try{
+    //     size_t li = line_index_of(addr);
+    //     uint64_t mask = (1ULL << li);
+    //     return (thread_dirty_bitmap[tid].load(std::memory_order_acquire) & mask) != 0;
+    // }catch (const std::exception& e) { 
+    //     // 打印异常信息：e.what() 返回描述性字符串
+    //     std::cerr << "捕获到标准异常：" << e.what() << std::endl;
+    // }
+    // exit(0);
     try{
         size_t li = line_index_of(addr);
-        uint64_t mask = (1ULL << li);
-        return (thread_dirty_bitmap[tid].load(std::memory_order_acquire) & mask) != 0;
-    }catch (const std::exception& e) { 
-        // 打印异常信息：e.what() 返回描述性字符串
+        uint64_t offset_mask = (1ULL << offset);
+        uint64_t offset_bit = thread_dirty_bitmap_perline[tid][li].load();
+        if(offset_bit != 0){
+            // dirty
+            if((offset_bit & offset_mask) != 0){
+                // true sharing
+                return COHERENCE_MISS_REASON::TURE_SHARING;
+            }else{
+                // false sharing
+                return COHERENCE_MISS_REASON::FALSE_SHARING;
+            }
+        }else{
+            // clean
+            return COHERENCE_MISS_REASON::CLEAN;
+        }
+    }catch (const std::exception& e){
         std::cerr << "捕获到标准异常：" << e.what() << std::endl;
     }
     exit(0);
 }
 
-bool ShadowPage::read(uint64_t addr, int32_t tid) {
+void ShadowPage::read(uint64_t addr, int32_t tid) {
     size_t li = line_index_of(addr);
-    uint64_t mask = (1ULL << li);
-    uint64_t dirty = thread_dirty_bitmap[tid].fetch_and(~mask, std::memory_order_acquire);
-    return (dirty & mask) != 0;
+    // uint64_t mask = (1ULL << li);
+    // set clean for cur cache line
+    // thread_dirty_bitmap[tid].fetch_and(~mask, std::memory_order_acquire);
+    // set clean for every offset of cur cache line
+    thread_dirty_bitmap_perline[tid][li].store(0);
+
+    // return (dirty & mask) != 0; // 1 != 0 -> true -> dirty;  0 == 0 -> false -> not dirty
 }
 
-bool ShadowPage::write(uint64_t addr, int32_t tid) {
+void ShadowPage::write(uint64_t addr, int32_t tid, uint32_t offset) {
     size_t li = line_index_of(addr);
-    uint64_t mask = (1ULL << li);
+    // uint64_t mask = (1ULL << li);
+    uint64_t offset_mask = (1ULL << offset);
     uint64_t dirty = 0;
     for (int i = 0; i < MAX_THREADS; i++) {
         if (i == tid) {
-            dirty = thread_dirty_bitmap[tid].fetch_and(~mask, std::memory_order_acquire);
+            // set clean for cur cache line
+            // thread_dirty_bitmap[i].fetch_and(~mask, std::memory_order_acquire);
+            // set clean for every offset of cur cache line
+            thread_dirty_bitmap_perline[i][li].store(0);
         } else {
-            thread_dirty_bitmap[i].fetch_or(mask, std::memory_order_acquire);
+            // set dirty for other threads of cur cache line
+            // thread_dirty_bitmap[i].fetch_or(mask, std::memory_order_acquire);
+            // set dirty for other threads of cur offset of cur cacheline
+            thread_dirty_bitmap_perline[i][li].fetch_or(offset_mask, std::memory_order_acquire);
         }
     }
-    return (dirty & mask) != 0;
+    // return (dirty & mask) != 0;
 }
 
 ShadowPage* ShadowPageTable::find_page(uint64_t addr) {
